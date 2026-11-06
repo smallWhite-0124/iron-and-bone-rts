@@ -939,13 +939,20 @@ function endGame(winner) {
 
 ui.factionChoices.forEach((button) => {
   button.addEventListener('click', () => {
+    if (!ui.startScreen.classList.contains('visible')) return;
     selectedFaction = button.dataset.faction;
     ui.factionChoices.forEach((choice) => choice.classList.toggle('selected', choice === button));
   });
 });
 
-ui.startBtn.addEventListener('click', () => startGame(selectedFaction));
-ui.restartBtn.addEventListener('click', () => startGame(selectedFaction));
+ui.startBtn.addEventListener('click', () => {
+  if (!ui.startScreen.classList.contains('visible')) return;
+  startGame(selectedFaction);
+});
+ui.restartBtn.addEventListener('click', () => {
+  if (!state?.ended || !ui.endScreen.classList.contains('visible')) return;
+  startGame(selectedFaction);
+});
 ui.pauseBtn.addEventListener('click', togglePause);
 ui.speedBtn.addEventListener('click', cycleSpeed);
 ui.newGameBtn.addEventListener('click', startFreshGame);
