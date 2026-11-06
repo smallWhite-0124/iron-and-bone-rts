@@ -1233,6 +1233,8 @@ function spawnUnit(side, unitId, options = {}) {
     healCooldown: def.heal ? rand(0.8, 1.8) : 0,
     flashCooldown: def.flashbang ? rand(1.5, 3) : 0,
     sweepCooldown: def.tailSweep ? rand(1.5, 3) : 0,
+    tailSlamTimer: 0,
+    tailSlamDuration: 0,
     commandFlash: 0,
     chargeDistance: 0,
     chargeCooldown: 0,
@@ -1517,6 +1519,7 @@ function updateUnits(side, dt) {
     unit.healCooldown = Math.max(0, unit.healCooldown - dt);
     unit.flashCooldown = Math.max(0, unit.flashCooldown - dt);
     unit.sweepCooldown = Math.max(0, unit.sweepCooldown - dt);
+    unit.tailSlamTimer = Math.max(0, unit.tailSlamTimer - dt);
 
     if (Math.abs(unit.knockbackX) > 0.5 || Math.abs(unit.knockbackY) > 0.5) {
       unit.x = clamp(unit.x + unit.knockbackX * dt, 24, WORLD.width - 24);
@@ -1833,26 +1836,56 @@ function triggerFlashbang(unit, target) {
 function performTailSweep(unit, side) {
   const sweep = unit.def.tailSweep;
   if (!sweep) return;
-  const enemy = otherSide(side);
+  const duration = 0.62;
+  unit.attackTimer = duration;
+  unit.attackDuration = duration;
+  unit.tailSlamTimer = duration;
+  unit.tailSlamDuration = duration;
+  unit.pendingAttack = {
+    special: 'tailSweep',
+    delay: 0.35,
+    damage: sweep.damage,
+    impact: sweep.impact,
+    knockdownDuration: sweep.knockdown,
+  };
+}
+
+function resolveTailSweep(unit, attack) {
+  const sweep = unit.def.tailSweep;
+  if (!sweep) return;
+  const enemy = otherSide(sideById(unit.side));
   for (const target of [...enemy.units]) {
     if (!targetAlive(target) || target.def.flying) continue;
     if (Math.abs(target.x - unit.x) > sweep.range || Math.abs(target.y - unit.y) > sweep.depth) continue;
-    const survived = dealDamage(unit, target, sweep.damage, 'melee', {
+    const survived = dealDamage(unit, target, attack.damage, 'melee', {
       heavy: true,
       direction: Math.sign(target.x - unit.x) || 1,
     });
-    if (survived) tryKnockdown(target, sweep.impact, sweep.knockdown);
+    if (survived) tryKnockdown(target, attack.impact, attack.knockdownDuration);
   }
-  unit.attackTimer = 0.45;
-  unit.attackDuration = 0.45;
-  addFloater('尾扫!', unit.x, unit.y - 92, '#ffb4e7', 18);
-  addRing(unit.x, unit.y - 5, '#e18dff', 24, 0.65);
-  addParticles(unit.x, unit.y - 18, '#cf9bff', 20, { speed: 130 });
+  const facing = unit.side === 'player' ? 1 : -1;
+  const impactX = unit.x - facing * 66;
+  addFloater('尾击!', unit.x, unit.y - 92, '#ffb4e7', 18);
+  addRing(impactX, unit.y - 3, '#e18dff', 26, 0.5);
+  addImpactBurst(impactX, unit.y - 8, '#ff9deb', true, -facing);
+  addParticles(impactX, unit.y - 5, '#cf9bff', 20, {
+    speed: 135,
+    size: 3.4,
+    life: 0.42,
+    gravity: -14,
+    vx: -facing * 70,
+    vy: -55,
+  });
+  camera.shakePower = Math.max(camera.shakePower, 2.2);
+  camera.shakeTime = Math.max(camera.shakeTime, 0.09);
+  playCombatSound('explosive', 1.0);
 }
 
 function interruptAttack(unit) {
   unit.pendingAttack = null;
   unit.attackTimer = 0;
+  unit.tailSlamTimer = 0;
+  unit.tailSlamDuration = 0;
 }
 
 function findNearbyAttackTarget(unit, preferredTarget) {
@@ -1977,6 +2010,10 @@ function fireAncientBeam(unit, target, attack) {
 
 function resolveAttack(unit, attack) {
   if (unit.dead) return;
+  if (attack.special === 'tailSweep') {
+    resolveTailSweep(unit, attack);
+    return;
+  }
   let target = attack.target;
   if (!targetAlive(target)) {
     target = findNearbyAttackTarget(unit, target);
@@ -4144,6 +4181,19 @@ function smoothStep(value) {
 function attackProgress(unit) {
   if (!unit.attackTimer || !unit.attackDuration) return 0;
   return clamp(1 - unit.attackTimer / unit.attackDuration, 0, 1);
+}
+
+function tailSlamProgress(unit) {
+  if (!unit.tailSlamTimer || !unit.tailSlamDuration) return 0;
+  return clamp(1 - unit.tailSlamTimer / unit.tailSlamDuration, 0, 1);
+}
+
+function tailSlamAngle(unit) {
+  const p = tailSlamProgress(unit);
+  if (p <= 0) return 0;
+  if (p < 0.44) return lerp(0, 0.92, smoothStep(p / 0.44));
+  if (p < 0.58) return lerp(0.92, -0.78, smoothStep((p - 0.44) / 0.14));
+  return lerp(-0.78, 0, smoothStep((p - 0.58) / 0.42));
 }
 
 function attackSwingCurve(unit) {
@@ -6662,7 +6712,7 @@ function drawAncientBeast(unit, time) {
   const phase = unit.walkPhase;
   const move = unit.moveBlend;
   const stride = Math.sin(phase) * 5 * move;
-  const cast = attackPulse(unit);
+  const cast = unit.tailSlamTimer > 0 ? 0 : attackPulse(unit);
   const ink = '#241a13';
   const body = '#6f477e';
   const bodyDark = '#4e315d';
@@ -6703,7 +6753,24 @@ function drawAncientBeast(unit, time) {
   drawBeastLeg(25, Math.PI * 0.2, false);
   drawBeastLeg(40, 0, false);
 
-  const tailAngle = Math.sin(phase) * 0.12 * move - cast * 0.55;
+  const tailSlamP = tailSlamProgress(unit);
+  const tailAngle = Math.sin(phase) * 0.12 * move + tailSlamAngle(unit);
+  if (tailSlamP > 0.39 && tailSlamP < 0.76) {
+    const trail = Math.sin(clamp((tailSlamP - 0.39) / 0.37, 0, 1) * Math.PI);
+    ctx.save();
+    ctx.translate(-36, -39);
+    ctx.strokeStyle = 'rgba(255, 147, 236, 0.2)';
+    ctx.lineWidth = 13;
+    ctx.beginPath();
+    ctx.arc(0, 0, 86, 2.05, 3.72);
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(255, 225, 255, ${0.5 * trail})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(0, 0, 86, 2.18, 3.58);
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.save();
   ctx.translate(-36, -39);
   ctx.rotate(tailAngle);
@@ -6716,22 +6783,34 @@ function drawAncientBeast(unit, time) {
   ctx.strokeStyle = '#a678b4';
   ctx.lineWidth = 7;
   ctx.stroke();
-  ctx.fillStyle = spine;
+  ctx.strokeStyle = 'rgba(245, 215, 250, 0.5)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = bodyDark;
   ctx.strokeStyle = ink;
+  ctx.lineWidth = 2.3;
+  ctx.beginPath();
+  ctx.ellipse(-62, 1, 12, 8, -0.16, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = spine;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(-56, -3);
-  ctx.lineTo(-76, 1);
-  ctx.lineTo(-59, 10);
+  ctx.moveTo(-66, -5);
+  ctx.lineTo(-82, 1);
+  ctx.lineTo(-68, 8);
+  ctx.lineTo(-60, 2);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
-  for (let index = 0; index < 3; index += 1) {
-    ctx.fillStyle = bodyDark;
+  for (let index = 0; index < 4; index += 1) {
+    const x = -22 - index * 10;
+    const y = -8 - index * 0.5;
+    ctx.fillStyle = index === 3 ? spine : bodyDark;
     ctx.beginPath();
-    ctx.moveTo(-23 - index * 12, -7 - index);
-    ctx.lineTo(-30 - index * 12, -18 - index * 2);
-    ctx.lineTo(-18 - index * 12, -8 - index);
+    ctx.moveTo(x, y);
+    ctx.lineTo(x - 8, y - 13 - index * 2);
+    ctx.lineTo(x + 2, y - 2);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
