@@ -12,6 +12,8 @@ const canvas = $('gameCanvas');
 const ctx = canvas.getContext('2d');
 
 const ui = {
+  app: $('app'),
+  uiLayer: $('uiLayer'),
   canvas,
   playerFaction: $('playerFaction'),
   enemyFaction: $('enemyFaction'),
@@ -5458,6 +5460,18 @@ function drawBattleScene(time) {
   drawDemolishHint();
   ctx.restore();
 }
+function fitUiLayer() {
+  if (!ui.app || !ui.uiLayer) return;
+  const scale = ui.app.clientWidth / 1600;
+  ui.uiLayer.style.transform = `scale(${scale})`;
+}
+
+window.addEventListener('resize', fitUiLayer);
+if (window.ResizeObserver) {
+  new ResizeObserver(fitUiLayer).observe(ui.app);
+}
+fitUiLayer();
+
 function updateAmbientTimers(dt) {
   if (toastTimer > 0) {
     toastTimer = Math.max(0, toastTimer - dt);
