@@ -537,3 +537,14 @@ button:focus-visible { outline: 3px solid #fff1be; outline-offset: 2px; }
   border-radius: 50%;
   background: rgba(255, 244, 204, 0.55);
 }
+
+#uiLayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1600px;
+  height: 900px;
+  pointer-events: none;
+  transform-origin: top left;
+  will-change: transform;
+}
