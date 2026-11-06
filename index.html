@@ -11,7 +11,8 @@
   <main id="app" aria-label="铁与骨横版 RTS 游戏">
     <canvas id="gameCanvas" width="1600" height="900" aria-label="横版战场"></canvas>
 
-    <div id="hud">
+    <div id="uiLayer">
+      <div id="hud">
       <section class="status-card player-status" aria-label="玩家状态">
         <div class="status-heading">
           <span id="playerFaction" class="faction-name">骑士团</span>
@@ -155,7 +156,8 @@
       <div class="micro-copy">按空格或点击顶部“继续”恢复</div>
     </div>
 
-    <div id="errorOverlay" class="error-overlay"></div>
+      <div id="errorOverlay" class="error-overlay"></div>
+    </div>
   </main>
 
   <script type="module" src="game.js"></script>
