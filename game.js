@@ -26,6 +26,7 @@ const ui = {
   matchClock: $('matchClock'),
   pauseBtn: $('pauseBtn'),
   speedBtn: $('speedBtn'),
+  newGameBtn: $('newGameBtn'),
   hintBar: $('hintBar'),
   buildCards: [...document.querySelectorAll('.build-card')],
   buildHint: $('buildHint'),
@@ -75,6 +76,12 @@ let nextId = 1;
 let frameFailure = false;
 const TARGET_FRAME_MS = 1000 / 60;
 const MAX_PARTICLES = 420;
+const AUTOSAVE_KEY = 'iron-and-bone-rts.autosave.v1';
+const AUTOSAVE_VERSION = 1;
+const AUTOSAVE_INTERVAL = 1.5;
+const AUTOSAVE_MAX_AGE = 24 * 60 * 60 * 1000;
+let autosaveAccumulator = 0;
+let restoringSave = false;
 
 const backgroundSeeds = Array.from({ length: 180 }, (_, index) => {
   const seed = (index * 16807 + 77) % 2147483647;
@@ -197,8 +204,187 @@ function createSide(sideId, factionId, isPlayer) {
   };
 }
 
-function startGame(factionId = selectedFaction) {
-  selectedFaction = factionId;
+function serializeSide(side) {
+  return {
+    faction: side.faction,
+    gold: side.gold,
+    baseHp: side.base.hp,
+    baseMaxHp: side.base.maxHp,
+    frontierX: side.frontierX,
+    initialFrontierX: side.initialFrontierX,
+    barracksUnit: side.barracksUnit,
+    shamanTimer: side.shamanTimer,
+    aiThinkTimer: side.aiThinkTimer,
+    aiSwitchTimer: side.aiSwitchTimer,
+    aiProduceTimer: side.aiProduceTimer,
+    aiUpgradeTimer: side.aiUpgradeTimer,
+    buildings: side.buildings.map((building) => ({
+      type: building.type,
+      x: building.x,
+      y: building.y,
+      level: building.level,
+      hp: building.hp,
+      maxHp: building.maxHp,
+      invested: building.invested,
+      completed: building.completed,
+      buildProgress: building.buildProgress,
+      buildTime: building.buildTime,
+      queue: [...building.queue],
+      trainTimer: building.trainTimer,
+      attackCooldown: building.attackCooldown,
+    })),
+    units: side.units.map((unit) => ({
+      defId: unit.defId,
+      x: unit.x,
+      y: unit.y,
+      preferredY: unit.preferredY,
+      hp: unit.hp,
+      command: unit.command,
+      revived: unit.revived,
+    })),
+  };
+}
+
+function saveGame() {
+  if (!state || state.ended || restoringSave) return;
+  try {
+    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({
+      version: AUTOSAVE_VERSION,
+      savedAt: Date.now(),
+      selectedFaction,
+      time: state.time,
+      cameraX: camera.x,
+      gameSpeed,
+      player: serializeSide(state.player),
+      enemy: serializeSide(state.enemy),
+    }));
+  } catch (error) {
+    console.warn('Autosave failed', error);
+  }
+}
+
+function clearAutosave() {
+  try {
+    localStorage.removeItem(AUTOSAVE_KEY);
+  } catch {
+    // Storage may be unavailable.
+  }
+  autosaveAccumulator = 0;
+}
+
+function loadAutosave() {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    if (!raw) return null;
+    const payload = JSON.parse(raw);
+    if (payload.version !== AUTOSAVE_VERSION) throw new Error('Autosave version mismatch');
+    if (!payload.player || !FACTIONS[payload.player.faction]) throw new Error('Invalid autosave');
+    if (!Number.isFinite(payload.savedAt) || Date.now() - payload.savedAt > AUTOSAVE_MAX_AGE) {
+      clearAutosave();
+      return null;
+    }
+    return payload;
+  } catch {
+    clearAutosave();
+    return null;
+  }
+}
+
+function restoreSide(side, data) {
+  if (!data) return;
+  side.gold = Number.isFinite(data.gold) ? Math.max(0, data.gold) : side.gold;
+  side.base.maxHp = Number.isFinite(data.baseMaxHp) ? data.baseMaxHp : side.base.maxHp;
+  side.base.hp = clamp(Number.isFinite(data.baseHp) ? data.baseHp : side.base.maxHp, 1, side.base.maxHp);
+  side.initialFrontierX = Number.isFinite(data.initialFrontierX) ? data.initialFrontierX : side.initialFrontierX;
+  side.frontierX = Number.isFinite(data.frontierX) ? data.frontierX : side.frontierX;
+  side.shamanTimer = Number.isFinite(data.shamanTimer) ? data.shamanTimer : REVIVE_RULES.interval;
+  side.aiThinkTimer = Number.isFinite(data.aiThinkTimer) ? data.aiThinkTimer : 0.8;
+  side.aiSwitchTimer = Number.isFinite(data.aiSwitchTimer) ? data.aiSwitchTimer : 0;
+  side.aiProduceTimer = Number.isFinite(data.aiProduceTimer) ? data.aiProduceTimer : 1.2;
+  side.aiUpgradeTimer = Number.isFinite(data.aiUpgradeTimer) ? data.aiUpgradeTimer : 6;
+  if (UNIT_DEFS[data.barracksUnit] && UNIT_DEFS[data.barracksUnit].faction === side.faction) {
+    side.barracksUnit = data.barracksUnit;
+  }
+
+  side.buildings = [];
+  for (const buildingData of data.buildings || []) {
+    if (!BUILDING_DEFS[buildingData.type]) continue;
+    const building = makeBuilding(side, buildingData.type, buildingData.x, buildingData.y);
+    building.level = clamp(Number(buildingData.level) || 1, 1, 3);
+    building.maxHp = Number.isFinite(buildingData.maxHp)
+      ? buildingData.maxHp
+      : Math.round(BUILDING_DEFS[buildingData.type].hp * buildingHpMultiplier(building.level));
+    building.hp = clamp(Number.isFinite(buildingData.hp) ? buildingData.hp : building.maxHp, 1, building.maxHp);
+    building.invested = Number.isFinite(buildingData.invested) ? buildingData.invested : BUILDING_DEFS[buildingData.type].cost;
+    building.completed = Boolean(buildingData.completed);
+    building.buildProgress = clamp(Number(buildingData.buildProgress) || 0, 0, 1);
+    building.buildTime = Number.isFinite(buildingData.buildTime) ? buildingData.buildTime : BUILDING_DEFS[buildingData.type].buildTime;
+    building.queue = Array.isArray(buildingData.queue)
+      ? buildingData.queue.filter((unitId) => UNIT_DEFS[unitId]?.faction === side.faction).slice(0, WORLD.queueLimit)
+      : [];
+    building.trainTimer = Number.isFinite(buildingData.trainTimer) ? buildingData.trainTimer : 0;
+    building.attackCooldown = Number.isFinite(buildingData.attackCooldown) ? buildingData.attackCooldown : 0;
+    side.buildings.push(building);
+  }
+
+  side.units = [];
+  for (const unitData of data.units || []) {
+    const def = UNIT_DEFS[unitData.defId];
+    if (!def || def.faction !== side.faction) continue;
+    const unit = spawnUnit(side, unitData.defId, {
+      x: unitData.x,
+      preferredY: unitData.preferredY,
+      command: ['attack', 'hold', 'retreat'].includes(unitData.command) ? unitData.command : 'hold',
+      revived: Boolean(unitData.revived),
+      ignoreCap: true,
+      silent: true,
+    });
+    if (!unit) continue;
+    unit.y = clampBattlefieldY(Number.isFinite(unitData.y) ? unitData.y : unit.preferredY);
+    unit.x = clamp(Number(unitData.x) || unit.x, 24, WORLD.width - 24);
+    unit.preferredY = clampBattlefieldY(Number.isFinite(unitData.preferredY) ? unitData.preferredY : unit.y);
+    unit.hp = clamp(Number.isFinite(unitData.hp) ? unitData.hp : unit.maxHp, 1, unit.maxHp);
+    unit.target = null;
+    unit.pendingAttack = null;
+    unit.detour = null;
+  }
+}
+
+function restoreGameState(snapshot) {
+  restoringSave = true;
+  state.time = Math.max(0, Number(snapshot.time) || 0);
+  camera.x = clamp(Number(snapshot.cameraX) || 0, 0, WORLD.width - WORLD.viewWidth);
+  camera.velocity = 0;
+  gameSpeed = [1, 2, 3].includes(snapshot.gameSpeed) ? snapshot.gameSpeed : 1;
+  restoreSide(state.player, snapshot.player);
+  restoreSide(state.enemy, snapshot.enemy);
+  state.projectiles = [];
+  state.particles = [];
+  state.floaters = [];
+  state.commandBursts = [];
+  selectedUnits = [];
+  selectedBuilding = null;
+  buildMode = null;
+  paused = false;
+  ui.pauseBtn.textContent = '暂停';
+  ui.pauseOverlay.classList.remove('visible');
+  ui.speedBtn.textContent = `${gameSpeed}×`;
+  updateHud(true);
+  restoringSave = false;
+}
+
+function startFreshGame() {
+  if (state && !state.ended) {
+    const confirmed = window.confirm('放弃当前对局并重新开始？');
+    if (!confirmed) return;
+  }
+  startGame(selectedFaction);
+}
+
+function startGame(factionId = selectedFaction, options = {}) {
+  const resumeSnapshot = options.snapshot || null;
+  if (!resumeSnapshot) clearAutosave();
+  selectedFaction = resumeSnapshot?.player?.faction || factionId;
   const enemyFactionId = factionId === 'knight' ? 'skeleton' : 'knight';
 
   state = {
@@ -235,13 +421,22 @@ function startGame(factionId = selectedFaction) {
   ui.pauseOverlay.classList.remove('visible');
   ui.pauseBtn.textContent = '暂停';
   ui.speedBtn.textContent = '1×';
+  autosaveAccumulator = 0;
   ui.buildHint.textContent = '选择建筑后点击己方领地内的空地';
 
   syncFactionUi();
   populateUnitButtons();
   updateHud(true);
-  setHint(DEFAULT_HINT, 10);
-  setToast('先建造矿机与兵营，再选择兵营的生产兵种。', 3200);
+  if (resumeSnapshot) {
+    restoreGameState(resumeSnapshot);
+    setHint(DEFAULT_HINT, 8);
+    setToast('已自动恢复上次对局。', 2600);
+  } else {
+    setHint(DEFAULT_HINT, 10);
+    setToast('先建造矿机与兵营，再选择兵营的生产兵种。', 3200);
+  }
+  autosaveAccumulator = 0;
+  saveGame();
 }
 
 function syncFactionUi() {
@@ -528,6 +723,7 @@ function endGame(winner) {
   buildMode = null;
   paused = false;
   ui.pauseOverlay.classList.remove('visible');
+  clearAutosave();
   ui.endTitle.textContent = winner === 'player' ? '胜利' : '战败';
   ui.endTitle.style.color = winner === 'player' ? '#e9c36b' : '#ff795e';
   ui.endDescription.textContent = winner === 'player'
@@ -550,6 +746,7 @@ ui.startBtn.addEventListener('click', () => startGame(selectedFaction));
 ui.restartBtn.addEventListener('click', () => startGame(selectedFaction));
 ui.pauseBtn.addEventListener('click', togglePause);
 ui.speedBtn.addEventListener('click', cycleSpeed);
+ui.newGameBtn.addEventListener('click', startFreshGame);
 
 ui.buildCards.forEach((card) => {
   card.addEventListener('click', () => setBuildMode(card.dataset.building));
@@ -642,6 +839,8 @@ window.addEventListener('keyup', (event) => {
   pressedKeys.delete(event.code);
 });
 window.addEventListener('blur', () => pressedKeys.clear());
+window.addEventListener('pagehide', () => saveGame());
+document.addEventListener('visibilitychange', () => { if (document.hidden) saveGame(); });
 function sideById(sideId) {
   return sideId === 'player' ? state.player : state.enemy;
 }
@@ -740,6 +939,7 @@ function tryPlaceBuilding(side, type, x, y, isPlayerAction = false) {
     ui.buildHint.textContent = '选择建筑后点击己方领地内的空地';
     setToast(`${building.name}开始建造。`, 1600);
     updateHud(true);
+    saveGame();
   }
 
   return true;
@@ -795,6 +995,7 @@ function upgradeBuilding(side, building, notify = false) {
     setToast(`${building.name}已升级到 Lv.${building.level}。`, 1800);
     updateHud(true);
   }
+  saveGame();
   return true;
 }
 
@@ -805,7 +1006,7 @@ function upgradeSelectedBuilding() {
 
 function spawnUnit(side, unitId, options = {}) {
   if (!state || state.ended) return null;
-  if (side.units.length >= getArmyCap(side)) return null;
+  if (!options.ignoreCap && side.units.length >= getArmyCap(side)) return null;
   const def = UNIT_DEFS[unitId];
   if (!def) return null;
 
@@ -865,7 +1066,7 @@ function spawnUnit(side, unitId, options = {}) {
   }
 
   side.units.push(unit);
-  addParticles(unit.x, unit.y - 24, factionOf(side).accent, 8, { speed: 45 });
+  if (!options.silent) addParticles(unit.x, unit.y - 24, factionOf(side).accent, 8, { speed: 45 });
   return unit;
 }
 
@@ -941,6 +1142,7 @@ function enqueueUnit(side, barracks, unitId, notify = false) {
   if (notify) {
     setToast(`${barracks.name}已加入 ${def.name}（${barracks.queue.length}/${WORLD.queueLimit}）。`, 1700);
   }
+  saveGame();
   return true;
 }
 
@@ -1485,6 +1687,7 @@ function demolishBuilding(building) {
   addFloater(`+${refund}`, building.x, building.y - 45, '#6ee7b7', 16);
   setToast(`${buildingName}已拆除，返还 ${refund} 资源。`, 1800);
   updateHud(true);
+  saveGame();
   return true;
 }
 
@@ -1865,6 +2068,7 @@ function issueCommand(command) {
   addFloater(commandInfo.label, centerX, centerY - 78, commandInfo.color, 20);
   setToast(`${selectedUnits.length} 名士兵：${commandInfo.label}。`, 1400);
   updateHud(true);
+  saveGame();
 }
 
 function addParticles(x, y, color, count = 6, options = {}) {
@@ -4036,6 +4240,13 @@ function frame(now) {
 
     updateAmbientTimers(rawDt);
     updateCamera(rawDt);
+    if (state && !paused && !state.ended && !restoringSave) {
+      autosaveAccumulator += rawDt;
+      if (autosaveAccumulator >= AUTOSAVE_INTERVAL) {
+        autosaveAccumulator = 0;
+        saveGame();
+      }
+    }
     hudAccumulator += rawDt;
     if (state && hudAccumulator >= 0.08) {
       hudAccumulator = 0;
@@ -4052,8 +4263,11 @@ function frame(now) {
 
 const debugParams = new URLSearchParams(window.location.search);
 const autostart = debugParams.get('autostart');
+const savedGame = loadAutosave();
 if (autostart && FACTIONS[autostart]) {
   window.setTimeout(() => startGame(autostart), 120);
+} else if (savedGame) {
+  window.setTimeout(() => startGame(savedGame.player.faction, { snapshot: savedGame }), 80);
 }
 
 window.__RTS_DEBUG__ = {
