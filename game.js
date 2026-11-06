@@ -4058,6 +4058,51 @@ function attackPulse(unit) {
 function idleBreath(unit, time) {
   return Math.sin(time * 2.1 + unit.bobSeed) * (1 - unit.moveBlend) * 0.9;
 }
+
+function getHumanoidHandAnchor(unit, scale = 1, rear = false) {
+  const phase = unit.walkPhase;
+  const move = unit.moveBlend;
+  const swingPose = attackSwingCurve(unit);
+  const strikePose = attackPulse(unit);
+  const worldFacing = unit.side === 'player' ? 1 : -1;
+  const lean = clamp((unit.moveDirX ?? 1) * worldFacing, -1, 1) * 0.045 * move;
+  const bodyAngle = lean + clamp(swingPose, -0.9, 1.15) * 0.035;
+  const stanceDrop = Math.abs(Math.sin(phase)) * 0.75 * move + strikePose * 0.85;
+  const offset = rear ? Math.PI : 0;
+  const armSwing = Math.sin(phase + offset) * (rear ? 5.5 : 3.2) * move;
+  const shoulderX = rear ? -9.5 : 9.5;
+  const actionReach = strikePose * (rear ? -2.2 : 6.2);
+  const handX = shoulderX + (rear ? -6.5 : 7.5) + armSwing + actionReach;
+  const handY = -29 + Math.sin(phase + offset + 0.5) * 1.8 * move;
+  const cos = Math.cos(bodyAngle);
+  const sin = Math.sin(bodyAngle);
+  return {
+    x: scale * (cos * handX - sin * handY),
+    y: scale * (sin * handX + cos * handY + stanceDrop),
+    angle: bodyAngle,
+  };
+}
+
+function getSkeletonHandAnchor(unit, rear = false) {
+  const phase = unit.walkPhase;
+  const move = unit.moveBlend;
+  const offset = rear ? Math.PI : 0;
+  const armSwing = Math.sin(phase + offset) * (rear ? 5 : 3.2) * move;
+  const attackReach = attackPulse(unit) * (rear ? -2 : 5.5);
+  const handX = (rear ? -8 : 8) + (rear ? -7 : 6.5) + armSwing + attackReach;
+  const handY = -30 + Math.sin(phase + offset) * 1.7 * move;
+  return { x: handX, y: handY, angle: 0 };
+}
+
+function drawGripHand(radius = 2.8, color = '#d6b89e') {
+  ctx.fillStyle = color;
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+}
 function drawUnit(unit, time) {
   if (unit.dead) return;
   const def = unit.def;
@@ -4496,88 +4541,119 @@ function drawHumanoidBase(colors, unit, scale = 1) {
 function drawSwordKnight(unit, time) {
   const colors = { body: '#4c6b96', armor: '#8fa5be', legs: '#313b4a', skin: '#d6b89e', helmet: '#748ba3', visor: '#182330' };
   drawHumanoidBase(colors, unit);
+  const grip = getHumanoidHandAnchor(unit);
   const swing = attackSwingCurve(unit);
   const attack = 0.18 + swing;
   const pulse = attackPulse(unit);
 
   if (pulse > 0.12) {
     ctx.save();
+    ctx.translate(grip.x, grip.y);
+    ctx.rotate(grip.angle);
     ctx.globalAlpha = pulse * 0.34;
     ctx.strokeStyle = '#fff0b0';
     ctx.lineWidth = 5;
     ctx.beginPath();
-    ctx.arc(13, -35, 38, -1.0, 0.35);
+    ctx.arc(5, 0, 39, -1.05, 0.42);
     ctx.stroke();
     ctx.restore();
   }
 
   ctx.save();
-  ctx.translate(12, -35);
-  ctx.rotate(attack);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle + attack);
+  ctx.strokeStyle = '#3f2819';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(-6, 0);
+  ctx.lineTo(4, 0);
+  ctx.stroke();
+  ctx.fillStyle = '#d5ad55';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.arc(-6, 0, 2.8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(34, 0);
+  ctx.moveTo(4, 0);
+  ctx.lineTo(39, 0);
   ctx.stroke();
   ctx.strokeStyle = '#eef2f5';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(34, 0);
+  ctx.moveTo(4, 0);
+  ctx.lineTo(39, 0);
   ctx.stroke();
   ctx.strokeStyle = '#e9c36b';
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.moveTo(0, -7);
-  ctx.lineTo(0, 7);
+  ctx.moveTo(4, -8);
+  ctx.lineTo(4, 8);
   ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,0.72)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(8, -1.2);
+  ctx.lineTo(35, -1.2);
+  ctx.stroke();
+  drawGripHand(3, colors.skin);
   ctx.restore();
 }
 function drawShieldKnight(unit, time) {
   const colors = { body: '#3d587d', armor: '#b1c0d1', legs: '#293241', skin: '#d8b99d', helmet: '#7e91a6', visor: '#121c27' };
   drawHumanoidBase(colors, unit, 1.06);
+  const grip = getHumanoidHandAnchor(unit, 1.06);
   const brace = Math.sin(unit.walkPhase) * 0.05 * unit.moveBlend + attackPulse(unit) * 0.12;
   const swing = attackSwingCurve(unit);
 
   ctx.save();
-  ctx.translate(14, -34);
-  ctx.rotate(-0.08 + brace);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - 0.08 + brace);
   ctx.fillStyle = '#3e78bd';
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(-3, -14);
-  ctx.lineTo(11, -9);
-  ctx.lineTo(12, 11);
-  ctx.quadraticCurveTo(4, 21, -3, 14);
+  ctx.moveTo(1, -15);
+  ctx.lineTo(15, -10);
+  ctx.lineTo(16, 10);
+  ctx.quadraticCurveTo(8, 20, 1, 13);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
   ctx.strokeStyle = '#e9c36b';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(4, -8);
-  ctx.lineTo(4, 10);
-  ctx.moveTo(-1, 1);
-  ctx.lineTo(9, 1);
+  ctx.moveTo(8, -9);
+  ctx.lineTo(8, 9);
+  ctx.moveTo(3, 0);
+  ctx.lineTo(13, 0);
   ctx.stroke();
+  drawGripHand(3.2, colors.skin);
   ctx.restore();
 
   ctx.save();
-  ctx.translate(8, -34);
-  ctx.rotate(-0.55 + swing * 0.8);
+  ctx.translate(grip.x + 1, grip.y + 2);
+  ctx.rotate(grip.angle - 0.55 + swing * 0.8);
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 5;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(37, 0);
+  ctx.moveTo(-4, 0);
+  ctx.lineTo(4, 0);
   ctx.stroke();
   ctx.strokeStyle = '#eef2f5';
   ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(37, 0);
+  ctx.moveTo(4, 0);
+  ctx.lineTo(38, 0);
+  ctx.stroke();
+  ctx.strokeStyle = '#e9c36b';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(4, -5);
+  ctx.lineTo(4, 5);
   ctx.stroke();
   ctx.restore();
 }
@@ -4680,29 +4756,48 @@ function drawCavalry(unit, time, heavy) {
   ctx.fill();
   ctx.stroke();
 
+  const riderHandX = 12;
+  const riderHandY = riderY + 9;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(7, riderY + 8);
+  ctx.lineTo(riderHandX, riderHandY);
+  ctx.stroke();
+  ctx.strokeStyle = armorColor;
+  ctx.lineWidth = 2.8;
+  ctx.beginPath();
+  ctx.moveTo(7, riderY + 8);
+  ctx.lineTo(riderHandX, riderHandY);
+  ctx.stroke();
+
+  ctx.save();
+  ctx.translate(riderHandX, riderHandY);
+  ctx.rotate(-0.48);
   ctx.strokeStyle = ink;
   ctx.lineWidth = heavy ? 7 : 6;
   ctx.beginPath();
-  ctx.moveTo(4, riderY + 6);
-  ctx.lineTo(54 + thrust, riderY - 20 + thrust * 0.08);
+  ctx.moveTo(-13, 0);
+  ctx.lineTo(58 + thrust, 0);
   ctx.stroke();
   ctx.strokeStyle = heavy ? '#d8e1eb' : '#d8c596';
   ctx.lineWidth = heavy ? 3 : 2.5;
   ctx.beginPath();
-  ctx.moveTo(4, riderY + 6);
-  ctx.lineTo(54 + thrust, riderY - 20 + thrust * 0.08);
+  ctx.moveTo(-13, 0);
+  ctx.lineTo(58 + thrust, 0);
   ctx.stroke();
-
   ctx.fillStyle = heavy ? '#e9c36b' : '#cfc09a';
   ctx.strokeStyle = ink;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(54 + thrust, riderY - 20 + thrust * 0.08);
-  ctx.lineTo(69 + thrust, riderY - 25 + thrust * 0.08);
-  ctx.lineTo(58 + thrust, riderY - 13 + thrust * 0.08);
+  ctx.moveTo(58 + thrust, 0);
+  ctx.lineTo(74 + thrust, -5);
+  ctx.lineTo(63 + thrust, 7);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
+  drawGripHand(2.8, '#d8baa0');
+  ctx.restore();
 
   ctx.fillStyle = heavy ? '#e9c36b' : '#6aa8ef';
   ctx.strokeStyle = ink;
@@ -4733,40 +4828,46 @@ function drawCavalry(unit, time, heavy) {
 function drawGunner(unit, time) {
   const colors = { body: '#4f6e8a', armor: '#8ea2b3', legs: '#303944', skin: '#d2aa8d', helmet: '#6c7d8e', visor: '#17212b' };
   drawHumanoidBase(colors, unit, 0.94);
+  const grip = getHumanoidHandAnchor(unit, 0.94);
   const p = attackProgress(unit);
-  const recoil = p > 0 && p < 0.52 ? attackPulse(unit) * 5 : 0;
+  const recoilKick = p > 0 && p < 0.52 ? attackPulse(unit) * 1.8 : 0;
 
   ctx.save();
-  ctx.translate(4 - recoil, -38);
-  ctx.rotate(-0.03 + (p > 0 ? Math.sin(p * Math.PI * 2) * 0.015 : 0));
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - 0.03 - recoilKick * 0.025);
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(-6, 5);
-  ctx.lineTo(44, -7);
+  ctx.moveTo(-9, 4);
+  ctx.lineTo(45, -6);
   ctx.stroke();
   ctx.strokeStyle = '#8a6844';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(-6, 5);
-  ctx.lineTo(44, -7);
+  ctx.moveTo(-7, 3);
+  ctx.lineTo(20, -2);
   ctx.stroke();
   ctx.strokeStyle = '#eef2f5';
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 2.4;
   ctx.beginPath();
-  ctx.moveTo(20, -3);
-  ctx.lineTo(49, -8);
+  ctx.moveTo(20, -2);
+  ctx.lineTo(51, -7);
   ctx.stroke();
-
+  ctx.fillStyle = '#c8a76d';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 1.2;
+  ctx.fillRect(4, 1, 8, 4);
+  ctx.strokeRect(4, 1, 8, 4);
   if (p > 0 && p < 0.34) {
     ctx.fillStyle = '#ffd778';
     ctx.strokeStyle = '#241a13';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(53, -8, 7 + p * 8, 0, Math.PI * 2);
+    ctx.arc(55 + recoilKick * 4, -8, 6 + p * 7, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
   }
+  drawGripHand(3, colors.skin);
   ctx.restore();
 }
 function drawPaladin(unit, time) {
@@ -4775,6 +4876,7 @@ function drawPaladin(unit, time) {
   const colors = { body: '#b6c2d1', armor: '#e1e7ef', legs: '#4c5968', skin: '#e0c3a9', helmet: '#d6c076', visor: '#28313c' };
   const flutter = Math.sin(unit.walkPhase * 0.8) * 4 * unit.moveBlend;
   drawHumanoidBase(colors, unit);
+  const grip = getHumanoidHandAnchor(unit);
   ctx.strokeStyle = '#f1d373';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -4785,49 +4887,62 @@ function drawPaladin(unit, time) {
   ctx.stroke();
 
   ctx.save();
-  ctx.translate(14, -34);
-  ctx.rotate(-0.04 + Math.sin(unit.walkPhase) * 0.04 * unit.moveBlend);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - 0.04 + Math.sin(unit.walkPhase) * 0.04 * unit.moveBlend);
   ctx.fillStyle = '#e9c36b';
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(-3, -15);
-  ctx.lineTo(13, -20);
-  ctx.lineTo(15, 2);
-  ctx.quadraticCurveTo(7, 14, -2, 11);
-  ctx.lineTo(-5, -4);
+  ctx.moveTo(1, -15);
+  ctx.lineTo(17, -20);
+  ctx.lineTo(19, 2);
+  ctx.quadraticCurveTo(11, 14, 2, 11);
+  ctx.lineTo(-1, -4);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = '#a87524';
-  ctx.fillRect(4, -11, 4, 17);
-  ctx.fillRect(-1, -4, 14, 4);
+  ctx.fillRect(8, -11, 4, 17);
+  ctx.fillRect(3, -4, 14, 4);
+  drawGripHand(3.2, colors.skin);
   ctx.restore();
 
   ctx.save();
-  ctx.translate(-5, -38);
-  ctx.rotate(-0.95 + attackSwingCurve(unit) * 1.1);
+  ctx.translate(grip.x + 1, grip.y - 1);
+  ctx.rotate(grip.angle - 0.92 + attackSwingCurve(unit) * 1.1);
+  ctx.strokeStyle = '#3b2b1c';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(-7, 0);
+  ctx.lineTo(6, 0);
+  ctx.stroke();
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 7;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(-39, -27);
+  ctx.moveTo(6, 0);
+  ctx.lineTo(47, 0);
   ctx.stroke();
   ctx.strokeStyle = '#f8f1d8';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(-39, -27);
+  ctx.moveTo(6, 0);
+  ctx.lineTo(47, 0);
   ctx.stroke();
   ctx.fillStyle = '#e9c36b';
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(-39 + flutter * 0.2, -27);
-  ctx.lineTo(-30, -38);
-  ctx.lineTo(-32, -20);
+  ctx.moveTo(47 + flutter * 0.2, 0);
+  ctx.lineTo(41, -5);
+  ctx.lineTo(41, 5);
   ctx.closePath();
   ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = '#e9c36b';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(6, -6);
+  ctx.lineTo(6, 6);
   ctx.stroke();
   ctx.restore();
   ctx.restore();
@@ -5029,33 +5144,47 @@ function drawBoneSoldier(unit, time) {
     ctx.restore();
   }
 
+  const grip = getSkeletonHandAnchor(unit);
   ctx.save();
-  ctx.translate(2, -36);
-  ctx.rotate(-0.28 + swing * 0.85);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - 0.28 + swing * 0.85);
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(-5, 0);
+  ctx.lineTo(6, 0);
+  ctx.stroke();
+  ctx.strokeStyle = '#8d7358';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-5, 0);
+  ctx.lineTo(6, 0);
+  ctx.stroke();
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(22, 0);
+  ctx.moveTo(6, 0);
+  ctx.lineTo(23, 0);
   ctx.stroke();
   ctx.strokeStyle = '#d7c49e';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(22, 0);
+  ctx.moveTo(6, 0);
+  ctx.lineTo(23, 0);
   ctx.stroke();
   ctx.fillStyle = '#f0e2c4';
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 1.5;
   ctx.beginPath();
-  ctx.moveTo(21, -5);
-  ctx.lineTo(33, -9);
-  ctx.lineTo(29, 0);
-  ctx.lineTo(36, 6);
-  ctx.lineTo(21, 4);
+  ctx.moveTo(22, -5);
+  ctx.lineTo(34, -9);
+  ctx.lineTo(30, 0);
+  ctx.lineTo(37, 6);
+  ctx.lineTo(22, 4);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
+  drawGripHand(2.4, '#d9cbb2');
   ctx.restore();
 }
 function drawBoneDog(unit, time) {
@@ -5175,20 +5304,36 @@ function drawBoneShaman(unit, time) {
   ctx.arc(2.5, -49, 1.5, 0, Math.PI * 2);
   ctx.fill();
 
+  const grip = { x: 15, y: -31 };
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(8, -42);
+  ctx.lineTo(12, -36);
+  ctx.lineTo(grip.x, grip.y);
+  ctx.stroke();
+  ctx.strokeStyle = '#c9bdcf';
+  ctx.lineWidth = 2.6;
+  ctx.beginPath();
+  ctx.moveTo(8, -42);
+  ctx.lineTo(12, -36);
+  ctx.lineTo(grip.x, grip.y);
+  ctx.stroke();
+
   ctx.save();
-  ctx.translate(11, -35);
+  ctx.translate(grip.x, grip.y);
   ctx.rotate(-0.08 - cast * 0.18);
   ctx.strokeStyle = ink;
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(11, -25);
+  ctx.moveTo(-7, 9);
+  ctx.lineTo(7, -27);
   ctx.stroke();
   ctx.strokeStyle = '#7d654f';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(11, -25);
+  ctx.moveTo(-7, 9);
+  ctx.lineTo(7, -27);
   ctx.stroke();
 
   const orbPulse = 0.65 + Math.sin(time * 3 + unit.bobSeed) * 0.12 + cast * 0.2;
@@ -5196,16 +5341,17 @@ function drawBoneShaman(unit, time) {
   ctx.strokeStyle = ink;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(11, -30, 6 + cast * 2, 0, Math.PI * 2);
+  ctx.arc(7, -32, 6 + cast * 2, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
   if (cast > 0.12) {
     ctx.strokeStyle = `rgba(117, 239, 200, ${0.4 * cast})`;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(11, -30, 14 + cast * 10, 0, Math.PI * 2);
+    ctx.arc(7, -32, 14 + cast * 10, 0, Math.PI * 2);
     ctx.stroke();
   }
+  drawGripHand(2.5, '#c9bdcf');
   ctx.restore();
   ctx.restore();
 }
@@ -5301,6 +5447,7 @@ function drawBoneGiant(unit, time) {
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
+  drawGripHand(2.8, bone);
   ctx.restore();
   ctx.restore();
 }
@@ -5490,35 +5637,52 @@ function drawArcaneCaster(unit, palette, variant) {
     ctx.stroke();
   }
 
+  const grip = { x: 15, y: -31 };
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(8, -43);
+  ctx.lineTo(12, -36);
+  ctx.lineTo(grip.x, grip.y);
+  ctx.stroke();
+  ctx.strokeStyle = palette.robe;
+  ctx.lineWidth = 2.8;
+  ctx.beginPath();
+  ctx.moveTo(8, -43);
+  ctx.lineTo(12, -36);
+  ctx.lineTo(grip.x, grip.y);
+  ctx.stroke();
+
   ctx.save();
-  ctx.translate(11, -37);
+  ctx.translate(grip.x, grip.y);
   ctx.rotate(-0.13 - cast * 0.18 - pulse * 0.08);
   ctx.strokeStyle = ink;
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(0, 4);
-  ctx.lineTo(12, -31);
+  ctx.moveTo(-5, 8);
+  ctx.lineTo(8, -29);
   ctx.stroke();
   ctx.strokeStyle = palette.trim;
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 4);
-  ctx.lineTo(12, -31);
+  ctx.moveTo(-5, 8);
+  ctx.lineTo(8, -29);
   ctx.stroke();
   ctx.fillStyle = palette.glow;
   ctx.strokeStyle = ink;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(12, -35, 6 + pulse * 3, 0, Math.PI * 2);
+  ctx.arc(8, -34, 6 + pulse * 3, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
   if (pulse > 0.18 || variant === 'wizard') {
     ctx.strokeStyle = `${palette.glow}88`;
     ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(12, -35, 13 + pulse * 11, 0, Math.PI * 2);
+    ctx.arc(8, -34, 13 + pulse * 11, 0, Math.PI * 2);
     ctx.stroke();
   }
+  drawGripHand(2.5, '#d8cbdc');
   ctx.restore();
   ctx.restore();
 }
@@ -5555,25 +5719,27 @@ function drawSoulSwordsman(unit, time) {
   ctx.globalAlpha = 0.84;
   drawSkeletonFrame(unit, '#bffcff');
   const swing = attackSwingCurve(unit);
-  ctx.translate(3, -36);
-  ctx.rotate(-0.2 + swing * 0.9);
+  const grip = getSkeletonHandAnchor(unit);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - 0.2 + swing * 0.9);
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 5;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(29, 0);
+  ctx.moveTo(-5, 0);
+  ctx.lineTo(5, 0);
   ctx.stroke();
   ctx.strokeStyle = '#d7ffff';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(29, 0);
+  ctx.moveTo(5, 0);
+  ctx.lineTo(31, 0);
   ctx.stroke();
   ctx.strokeStyle = '#8cf5ee';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(9, -1, 23, -0.9, 0.4);
+  ctx.arc(13, -1, 23, -0.9, 0.4);
   ctx.stroke();
+  drawGripHand(2.3, '#bffcff');
   ctx.restore();
 }
 
@@ -5667,62 +5833,74 @@ function drawAncientBeast(unit, time) {
 function drawSwat(unit, time) {
   const colors = { body: '#293b42', armor: '#52656b', legs: '#20282c', skin: '#d4b193', helmet: '#37494f', visor: '#10171a' };
   drawHumanoidBase(colors, unit, 1.04);
+  const grip = getHumanoidHandAnchor(unit, 1.04);
   const brace = Math.sin(unit.walkPhase) * 0.05 * unit.moveBlend + attackPulse(unit) * 0.1;
   const swing = attackSwingCurve(unit);
   ctx.save();
-  ctx.translate(14, -34);
-  ctx.rotate(-0.08 + brace);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - 0.08 + brace);
   ctx.fillStyle = '#d9e0dd';
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(-3, -15);
-  ctx.lineTo(12, -10);
-  ctx.lineTo(13, 10);
-  ctx.quadraticCurveTo(3, 20, -4, 12);
+  ctx.moveTo(1, -15);
+  ctx.lineTo(16, -10);
+  ctx.lineTo(17, 10);
+  ctx.quadraticCurveTo(7, 20, 0, 12);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
   ctx.fillStyle = '#4c6870';
-  ctx.fillRect(2, -8, 7, 17);
+  ctx.fillRect(6, -8, 7, 17);
+  drawGripHand(3.1, colors.skin);
   ctx.restore();
 
   ctx.save();
-  ctx.translate(8, -34);
-  ctx.rotate(-0.5 + swing * 0.9);
+  ctx.translate(grip.x + 1, grip.y + 1);
+  ctx.rotate(grip.angle - 0.5 + swing * 0.9);
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(32, 0);
+  ctx.moveTo(-6, 0);
+  ctx.lineTo(34, 0);
   ctx.stroke();
   ctx.strokeStyle = '#b9c5c8';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 0);
-  ctx.lineTo(32, 0);
+  ctx.moveTo(-6, 0);
+  ctx.lineTo(34, 0);
+  ctx.stroke();
+  ctx.strokeStyle = '#2c3538';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(-6, 0);
+  ctx.lineTo(-1, 0);
   ctx.stroke();
   ctx.restore();
 }
-
 function drawRiotPolice(unit, time) {
   const colors = { body: '#2f4350', armor: '#607985', legs: '#24313a', skin: '#d9b59a', helmet: '#445a65', visor: '#131b20' };
   drawHumanoidBase(colors, unit, 0.98);
-  const recoil = attackPulse(unit) * 4;
+  const grip = getHumanoidHandAnchor(unit, 0.98);
+  const recoil = attackPulse(unit) * 1.4;
   ctx.save();
-  ctx.translate(5 - recoil, -38);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - recoil * 0.02);
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 5;
   ctx.beginPath();
-  ctx.moveTo(0, 4);
-  ctx.lineTo(29, -5);
+  ctx.moveTo(-8, 4);
+  ctx.lineTo(32, -5);
   ctx.stroke();
   ctx.strokeStyle = '#c4d0d2';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, 4);
-  ctx.lineTo(29, -5);
+  ctx.moveTo(-6, 3);
+  ctx.lineTo(32, -5);
   ctx.stroke();
+  ctx.fillStyle = '#26343a';
+  ctx.fillRect(1, 1, 8, 3);
+  drawGripHand(2.8, colors.skin);
   ctx.restore();
   ctx.fillStyle = '#e3bd58';
   ctx.strokeStyle = '#241a13';
@@ -5734,50 +5912,43 @@ function drawRiotPolice(unit, time) {
   ctx.fillStyle = '#4d5660';
   ctx.fillRect(-16, -48, 6, 5);
 }
-
 function drawSpecialForces(unit, time) {
   const colors = { body: '#344d43', armor: '#667f70', legs: '#26352f', skin: '#d0a98d', helmet: '#42584c', visor: '#101713' };
   drawHumanoidBase(colors, unit, 1.0);
-  const recoil = attackPulse(unit) * 3;
+  const grip = getHumanoidHandAnchor(unit, 1.0);
+  const recoil = attackPulse(unit) * 1.2;
   ctx.save();
-  ctx.translate(4 - recoil, -39);
+  ctx.translate(grip.x, grip.y);
+  ctx.rotate(grip.angle - recoil * 0.018);
   ctx.strokeStyle = '#241a13';
   ctx.lineWidth = 6;
   ctx.beginPath();
-  ctx.moveTo(-3, 4);
-  ctx.lineTo(43, -5);
+  ctx.moveTo(-9, 4);
+  ctx.lineTo(45, -5);
   ctx.stroke();
   ctx.strokeStyle = '#48544d';
   ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.moveTo(-3, 4);
+  ctx.moveTo(-7, 3);
   ctx.lineTo(43, -5);
   ctx.stroke();
   ctx.strokeStyle = '#d9dfd9';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(22, 0);
-  ctx.lineTo(46, -6);
+  ctx.moveTo(23, -1);
+  ctx.lineTo(48, -6);
   ctx.stroke();
   ctx.fillStyle = '#1d2521';
-  ctx.fillRect(5, 7, 10, 7);
+  ctx.fillRect(3, 2, 10, 6);
   if (unit.attackTimer > 0) {
     ctx.fillStyle = '#ffe28a';
     ctx.beginPath();
-    ctx.arc(48, -6, 4, 0, Math.PI * 2);
+    ctx.arc(50, -6, 4, 0, Math.PI * 2);
     ctx.fill();
   }
+  drawGripHand(2.8, colors.skin);
   ctx.restore();
-  ctx.strokeStyle = '#1c2621';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(-12, -45);
-  ctx.lineTo(-17, -29);
-  ctx.moveTo(11, -45);
-  ctx.lineTo(17, -30);
-  ctx.stroke();
 }
-
 function drawTank(unit, time) {
   const recoil = attackPulse(unit) * 8;
   const ink = '#241a13';
