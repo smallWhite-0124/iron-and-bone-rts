@@ -218,6 +218,10 @@ function playCombatSound(kind, strength = 1, delay = 0) {
   } else if (kind === 'explosive') {
     playTone(92 * power, 0.28, 0.06, 'sine', 42, delay);
     playNoise(0.22, 0.055, 620, delay);
+  } else if (kind === 'laser') {
+    playTone(1080, 0.22, 0.025, 'sawtooth', 180, delay);
+    playTone(420, 0.3, 0.04, 'sine', 95, delay);
+    playNoise(0.11, 0.018, 3200, delay);
   } else if (kind === 'ranged') {
     playNoise(0.07, 0.035, 2200, delay);
     playTone(170, 0.045, 0.016, 'square', 95, delay);
@@ -501,6 +505,7 @@ function restoreGameState(snapshot) {
   state.floaters = [];
   state.commandBursts = [];
   state.hitBursts = [];
+  state.beams = [];
   selectedUnits = [];
   selectedBuilding = null;
   buildMode = null;
@@ -553,6 +558,7 @@ function startGame(factionId = selectedFaction, options = {}) {
     floaters: [],
     commandBursts: [],
     hitBursts: [],
+    beams: [],
     deathMarks: [],
     noticeFlags: new Set(),
   };
@@ -1874,7 +1880,7 @@ function findNearbyAttackTarget(unit, preferredTarget) {
 function performAttack(unit, target) {
   const def = unit.def;
   unit.attackCooldown = def.attackInterval;
-  const animationDuration = def.drawType === 'boneGiant' ? 0.62 : def.drawType === 'boneDragon' ? 0.5 : def.drawType === 'gunner' ? 0.3 : 0.38;
+  const animationDuration = def.drawType === 'boneGiant' ? 0.62 : def.drawType === 'boneDragon' ? 0.5 : def.drawType === 'ancientBeast' ? 0.56 : def.drawType === 'gunner' ? 0.3 : 0.38;
   unit.attackTimer = animationDuration;
   unit.attackDuration = animationDuration;
   let damage = def.damage;
@@ -1905,7 +1911,7 @@ function performAttack(unit, target) {
     unit.impactCooldown = def.heavyImpact.cooldown;
   }
 
-  const strikeDelay = animationDuration * (def.damageType === 'melee' ? 0.44 : 0.36);
+  const strikeDelay = animationDuration * (def.drawType === 'ancientBeast' ? 0.46 : def.damageType === 'melee' ? 0.44 : 0.36);
   unit.pendingAttack = {
     target,
     delay: strikeDelay,
@@ -1914,6 +1920,59 @@ function performAttack(unit, target) {
     impact,
     knockdownDuration,
   };
+}
+
+function fireAncientBeam(unit, target, attack) {
+  const facing = unit.side === 'player' ? 1 : -1;
+  const startX = unit.x + facing * 70;
+  const startY = unit.y - 43;
+  const endX = target.x;
+  const endY = target.y - (target.isBuilding ? Math.min(target.height * 0.48, 42) : target.def?.flying ? 170 : 34);
+  const color = unit.def.projectileColor || '#ff93ec';
+  const aoeRadius = unit.def.aoeRadius || 92;
+
+  state.beams.push({
+    id: uid('beam'),
+    startX,
+    startY,
+    endX,
+    endY,
+    color,
+    width: 26,
+    life: 0.26,
+    maxLife: 0.26,
+    seed: rand(0, Math.PI * 2),
+  });
+
+  const enemy = otherSide(sideById(unit.side));
+  for (const victim of [...enemy.units]) {
+    if (!targetAlive(victim)) continue;
+    if (Math.hypot(victim.x - endX, victim.y - endY) > aoeRadius) continue;
+    dealDamage(unit, victim, attack.damage, 'magic', {
+      heavy: true,
+      direction: Math.sign(victim.x - unit.x) || facing,
+    });
+  }
+  if (target.isBuilding) {
+    dealDamage(unit, target, attack.damage, 'magic', {
+      heavy: true,
+      direction: Math.sign(target.x - unit.x) || facing,
+    });
+  }
+
+  addImpactBurst(endX, endY, color, true, Math.sign(endX - startX) || facing);
+  addParticles(endX, endY, color, 26, {
+    speed: 165,
+    size: 3.3,
+    life: 0.38,
+    gravity: 90,
+    vx: facing * 65,
+    vy: -20,
+  });
+  addRing(endX, target.y - 4, color, 17, 0.45);
+  camera.shakePower = Math.max(camera.shakePower, 1.8);
+  camera.shakeTime = Math.max(camera.shakeTime, 0.08);
+  playCombatSound('laser', 1.25);
 }
 
 function resolveAttack(unit, attack) {
@@ -1929,6 +1988,10 @@ function resolveAttack(unit, attack) {
   const def = unit.def;
 
   if (attack.damageType !== 'melee') {
+    if (def.drawType === 'ancientBeast') {
+      fireAncientBeam(unit, target, attack);
+      return;
+    }
     const facing = unit.side === 'player' ? 1 : -1;
     const muzzleDistance = def.drawType === 'tank' ? 88 : def.drawType === 'helicopter' ? 72 : def.drawType === 'boneDragon' ? 68 : def.flying ? 62 : 48;
     const muzzleX = unit.x + facing * muzzleDistance;
@@ -2665,6 +2728,11 @@ function updateEffects(dt) {
     burst.life -= dt;
   }
   state.hitBursts = state.hitBursts.filter((burst) => burst.life > 0);
+
+  for (const beam of state.beams) {
+    beam.life -= dt;
+  }
+  state.beams = state.beams.filter((beam) => beam.life > 0);
 }
 
 function updateHud(force = false) {
@@ -4335,7 +4403,7 @@ function drawUnitOverlay(unit, selected, down) {
   }
 }
 
-function drawHumanoidBase(colors, unit, scale = 1) {
+function drawHumanoidBase(colors, unit, scale = 1, pose = {}) {
   ctx.save();
   ctx.scale(scale, scale);
 
@@ -4496,7 +4564,7 @@ function drawHumanoidBase(colors, unit, scale = 1) {
     ctx.stroke();
   }
 
-  drawArm(Math.PI, true);
+  if (!pose.hideRearArm) drawArm(Math.PI, true);
   drawLeg(Math.PI, true);
 
   ctx.fillStyle = colors.body || colors.armor;
@@ -6911,39 +6979,98 @@ function drawRiotPolice(unit, time) {
 }
 function drawSpecialForces(unit, time) {
   const colors = { body: '#344d43', armor: '#667f70', legs: '#26352f', skin: '#d0a98d', helmet: '#42584c', visor: '#101713' };
-  drawHumanoidBase(colors, unit, 1.0);
+  drawHumanoidBase(colors, unit, 1.0, { hideRearArm: true });
   const grip = getHumanoidHandAnchor(unit, 1.0);
-  const recoil = attackPulse(unit) * 1.2;
+  const p = attackProgress(unit);
+  const recoil = attackPulse(unit) * 1.5;
+  const weaponAngle = grip.angle - recoil * 0.02;
+  const cos = Math.cos(weaponAngle);
+  const sin = Math.sin(weaponAngle);
+  const supportX = grip.x + cos * 26 - sin * 1;
+  const supportY = grip.y + sin * 26 + cos * 1;
+
   ctx.save();
   ctx.translate(grip.x, grip.y);
-  ctx.rotate(grip.angle - recoil * 0.018);
+  ctx.rotate(weaponAngle);
+  ctx.lineJoin = 'round';
   ctx.strokeStyle = '#241a13';
-  ctx.lineWidth = 6;
+  ctx.lineWidth = 7;
   ctx.beginPath();
-  ctx.moveTo(-9, 4);
-  ctx.lineTo(45, -5);
+  ctx.moveTo(-12, 4);
+  ctx.lineTo(50, -5);
   ctx.stroke();
   ctx.strokeStyle = '#48544d';
   ctx.lineWidth = 4;
   ctx.beginPath();
-  ctx.moveTo(-7, 3);
-  ctx.lineTo(43, -5);
+  ctx.moveTo(-10, 3);
+  ctx.lineTo(8, 0);
   ctx.stroke();
+  ctx.fillStyle = '#29342f';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 2;
+  roundRectPath(5, -4, 23, 8, 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#56665e';
+  ctx.fillRect(8, -2.8, 13, 2);
+  ctx.fillStyle = '#18201c';
+  ctx.fillRect(9, 4, 7, 9);
+  ctx.strokeRect(9, 4, 7, 9);
+  ctx.fillStyle = '#3f4d46';
+  roundRectPath(20, -3, 12, 6, 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#202824';
+  ctx.fillRect(24, 3, 4, 7);
+  ctx.strokeRect(24, 3, 4, 7);
   ctx.strokeStyle = '#d9dfd9';
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(23, -1);
-  ctx.lineTo(48, -6);
+  ctx.moveTo(27, -1);
+  ctx.lineTo(52, -6);
   ctx.stroke();
+  ctx.fillStyle = '#161d19';
+  ctx.fillRect(12, -7, 12, 3);
+  ctx.fillStyle = '#8d9a91';
+  ctx.fillRect(14, -7, 2, 3);
   ctx.fillStyle = '#1d2521';
-  ctx.fillRect(3, 2, 10, 6);
-  if (unit.attackTimer > 0) {
+  ctx.fillRect(43, -8, 6, 3);
+  if (p > 0 && p < 0.5) {
     ctx.fillStyle = '#ffe28a';
+    ctx.strokeStyle = '#fff1bd';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.arc(50, -6, 4, 0, Math.PI * 2);
+    ctx.arc(54, -6, 4 + attackPulse(unit) * 4, 0, Math.PI * 2);
     ctx.fill();
+    ctx.stroke();
   }
   drawGripHand(2.8, colors.skin);
+  ctx.restore();
+
+  const shoulderX = -6;
+  const shoulderY = -43;
+  const elbowX = (shoulderX + supportX) * 0.5 - 2;
+  const elbowY = -35;
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 6.5;
+  ctx.beginPath();
+  ctx.moveTo(shoulderX, shoulderY);
+  ctx.quadraticCurveTo(elbowX, elbowY, supportX, supportY);
+  ctx.stroke();
+  ctx.strokeStyle = colors.body;
+  ctx.lineWidth = 3.4;
+  ctx.stroke();
+  ctx.fillStyle = colors.armor;
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 1.3;
+  ctx.beginPath();
+  ctx.ellipse(elbowX, elbowY, 3, 2.2, -0.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(supportX, supportY);
+  ctx.rotate(weaponAngle);
+  drawGripHand(2.7, colors.skin);
   ctx.restore();
 }
 function drawTank(unit, time) {
@@ -7236,6 +7363,43 @@ function drawHelicopter(unit, time) {
   ctx.restore();
 }
 
+function drawBeams() {
+  if (!state) return;
+  for (const beam of state.beams) {
+    const progress = 1 - beam.life / beam.maxLife;
+    const alpha = Math.max(0, 1 - progress);
+    const flicker = 0.85 + Math.sin(performance.now() * 0.06 + beam.seed) * 0.15;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = beam.color;
+    ctx.globalAlpha = alpha * 0.14 * flicker;
+    ctx.lineWidth = beam.width;
+    ctx.beginPath();
+    ctx.moveTo(beam.startX, beam.startY);
+    ctx.lineTo(beam.endX, beam.endY);
+    ctx.stroke();
+    ctx.globalAlpha = alpha * 0.38 * flicker;
+    ctx.lineWidth = beam.width * 0.48;
+    ctx.stroke();
+    ctx.globalAlpha = alpha * 0.95;
+    ctx.strokeStyle = '#fff2ff';
+    ctx.lineWidth = Math.max(2, beam.width * 0.12);
+    ctx.stroke();
+    ctx.fillStyle = beam.color;
+    ctx.globalAlpha = alpha * 0.28;
+    ctx.beginPath();
+    ctx.arc(beam.endX, beam.endY, 16 + progress * 30, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#fff4ff';
+    ctx.globalAlpha = alpha * 0.95;
+    ctx.beginPath();
+    ctx.arc(beam.endX, beam.endY, 4 + (1 - progress) * 7, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
 function drawProjectiles() {
   if (!state) return;
   for (const projectile of state.projectiles) {
@@ -7430,6 +7594,7 @@ function drawBattleScene(time) {
   }
 
   drawProjectiles();
+  drawBeams();
   drawEffects();
   drawSelectionOverlay();
   drawBuildGhost();
