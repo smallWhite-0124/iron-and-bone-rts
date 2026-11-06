@@ -76,8 +76,23 @@ let nextId = 1;
 let frameFailure = false;
 const TARGET_FRAME_MS = 1000 / 60;
 const MAX_PARTICLES = 420;
-const AUTOSAVE_KEY = 'iron-and-bone-rts.autosave.v1';
-const AUTOSAVE_VERSION = 1;
+const AUTOSAVE_KEY_PREFIX = 'iron-and-bone-rts.autosave.v2:';
+const LEGACY_AUTOSAVE_KEY = 'iron-and-bone-rts.autosave.v1';
+const TAB_SESSION_KEY = 'iron-and-bone-rts.tab-session';
+const AUTOSAVE_VERSION = 2;
+const tabSessionId = (() => {
+  try {
+    let id = sessionStorage.getItem(TAB_SESSION_KEY);
+    if (!id) {
+      id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      sessionStorage.setItem(TAB_SESSION_KEY, id);
+    }
+    return id;
+  } catch {
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+})();
+const autosaveKey = () => `${AUTOSAVE_KEY_PREFIX}${tabSessionId}`;
 const AUTOSAVE_INTERVAL = 1.5;
 const AUTOSAVE_MAX_AGE = 24 * 60 * 60 * 1000;
 let autosaveAccumulator = 0;
@@ -245,12 +260,33 @@ function serializeSide(side) {
   };
 }
 
+function cleanupStaleAutosaves() {
+  try {
+    const now = Date.now();
+    for (let index = localStorage.length - 1; index >= 0; index -= 1) {
+      const key = localStorage.key(index);
+      if (!key || !key.startsWith(AUTOSAVE_KEY_PREFIX) || key === autosaveKey()) continue;
+      try {
+        const payload = JSON.parse(localStorage.getItem(key));
+        if (!Number.isFinite(payload.savedAt) || now - payload.savedAt > AUTOSAVE_MAX_AGE) {
+          localStorage.removeItem(key);
+        }
+      } catch {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch {
+    // Storage cleanup is best-effort.
+  }
+}
+
 function saveGame() {
   if (!state || state.ended || restoringSave) return;
   try {
-    localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({
+    localStorage.setItem(autosaveKey(), JSON.stringify({
       version: AUTOSAVE_VERSION,
       savedAt: Date.now(),
+      sessionId: tabSessionId,
       selectedFaction,
       time: state.time,
       cameraX: camera.x,
@@ -265,7 +301,8 @@ function saveGame() {
 
 function clearAutosave() {
   try {
-    localStorage.removeItem(AUTOSAVE_KEY);
+    localStorage.removeItem(autosaveKey());
+    localStorage.removeItem(LEGACY_AUTOSAVE_KEY);
   } catch {
     // Storage may be unavailable.
   }
@@ -274,10 +311,10 @@ function clearAutosave() {
 
 function loadAutosave() {
   try {
-    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    const raw = localStorage.getItem(autosaveKey());
     if (!raw) return null;
     const payload = JSON.parse(raw);
-    if (payload.version !== AUTOSAVE_VERSION) throw new Error('Autosave version mismatch');
+    if (payload.version !== AUTOSAVE_VERSION || payload.sessionId !== tabSessionId) throw new Error('Autosave session mismatch');
     if (!payload.player || !FACTIONS[payload.player.faction]) throw new Error('Invalid autosave');
     if (!Number.isFinite(payload.savedAt) || Date.now() - payload.savedAt > AUTOSAVE_MAX_AGE) {
       clearAutosave();
@@ -5499,6 +5536,7 @@ function frame(now) {
 
 const debugParams = new URLSearchParams(window.location.search);
 const autostart = debugParams.get('autostart');
+cleanupStaleAutosaves();
 const savedGame = loadAutosave();
 if (autostart && FACTIONS[autostart]) {
   window.setTimeout(() => startGame(autostart), 120);
