@@ -375,17 +375,33 @@ function restoreGameState(snapshot) {
 
 function startFreshGame() {
   if (state && !state.ended) {
-    const confirmed = window.confirm('放弃当前对局并重新开始？');
+    const confirmed = window.confirm('放弃当前对局并返回阵营选择？');
     if (!confirmed) return;
   }
-  startGame(selectedFaction);
+  clearAutosave();
+  state = null;
+  paused = false;
+  buildMode = null;
+  selectedBuilding = null;
+  selectedUnits = [];
+  pointer = null;
+  hoverPoint = null;
+  hoverScreenPoint = null;
+  camera.x = 0;
+  camera.velocity = 0;
+  ui.startScreen.classList.add('visible');
+  ui.endScreen.classList.remove('visible');
+  ui.pauseOverlay.classList.remove('visible');
+  ui.pauseBtn.textContent = '暂停';
+  ui.toast.classList.remove('show');
+  ui.factionChoices.forEach((choice) => choice.classList.toggle('selected', choice.dataset.faction === selectedFaction));
 }
 
 function startGame(factionId = selectedFaction, options = {}) {
   const resumeSnapshot = options.snapshot || null;
   if (!resumeSnapshot) clearAutosave();
   selectedFaction = resumeSnapshot?.player?.faction || factionId;
-  const enemyFactionId = factionId === 'knight' ? 'skeleton' : 'knight';
+  const enemyFactionId = ({ knight: 'skeleton', skeleton: 'knight', arcane: 'special', special: 'arcane' })[factionId] || 'knight';
 
   state = {
     time: 0,
@@ -1050,6 +1066,10 @@ function spawnUnit(side, unitId, options = {}) {
     moveBlend: 0,
     walkPhase: rand(0, Math.PI * 2),
     stepDustTimer: rand(0.05, 0.25),
+    summonCooldown: def.summon ? rand(1.2, 2.5) : 0,
+    healCooldown: def.heal ? rand(0.8, 1.8) : 0,
+    flashCooldown: def.flashbang ? rand(1.5, 3) : 0,
+    sweepCooldown: def.tailSweep ? rand(1.5, 3) : 0,
     commandFlash: 0,
     chargeDistance: 0,
     chargeCooldown: 0,
@@ -1126,7 +1146,7 @@ function trainingSpeedForBarracks(building) {
 function enqueueUnit(side, barracks, unitId, notify = false) {
   if (!barracks || barracks.dead || !barracks.completed || barracks.type !== 'barracks') return false;
   const def = UNIT_DEFS[unitId];
-  if (!def) return false;
+  if (!def || def.faction !== side.faction || def.summonOnly) return false;
   if (barracks.queue.length >= WORLD.queueLimit) {
     if (notify) setToast('这所兵营的训练队列已满。', 1600);
     return false;
@@ -1328,6 +1348,10 @@ function updateUnits(side, dt) {
     unit.impactCooldown = Math.max(0, unit.impactCooldown - dt);
     unit.spawnGrace = Math.max(0, unit.spawnGrace - dt);
     unit.retargetTimer = Math.max(0, unit.retargetTimer - dt);
+    unit.summonCooldown = Math.max(0, unit.summonCooldown - dt);
+    unit.healCooldown = Math.max(0, unit.healCooldown - dt);
+    unit.flashCooldown = Math.max(0, unit.flashCooldown - dt);
+    unit.sweepCooldown = Math.max(0, unit.sweepCooldown - dt);
 
     if (unit.downTimer > 0 || unit.command === 'retreat') {
       unit.pendingAttack = null;
@@ -1363,6 +1387,8 @@ function updateUnits(side, dt) {
       continue;
     }
 
+    updateSupportAbilities(unit, side, dt);
+
     if (unit.retargetTimer <= 0 || !canTarget(unit, unit.target)) {
       unit.target = chooseTarget(unit);
       unit.retargetTimer = rand(0.28, 0.48);
@@ -1392,8 +1418,19 @@ function updateUnits(side, dt) {
         continue;
       }
       moveUnit(unit, dx, dy, dt, true);
-    } else if (unit.attackCooldown <= 0) {
-      performAttack(unit, target);
+    } else {
+      if (unit.def.flashbang && unit.flashCooldown <= 0 && distance <= unit.def.flashbang.range) {
+        triggerFlashbang(unit, target);
+      }
+      if (unit.def.tailSweep && unit.sweepCooldown <= 0 && distance <= unit.def.tailSweep.range) {
+        performTailSweep(unit, side);
+        unit.sweepCooldown = unit.def.tailSweep.cooldown;
+        unit.attackCooldown = 0.85;
+        continue;
+      }
+      if (unit.attackCooldown <= 0) {
+        performAttack(unit, target);
+      }
     }
   }
 }
@@ -1509,6 +1546,100 @@ function resolveUnitBuildingCollision(unit) {
     }
   }
 }
+function updateSupportAbilities(unit, side, dt) {
+  if (unit.def.summon) {
+    if (unit.summonCooldown <= 0) {
+      const summonDef = unit.def.summon;
+      const currentSummons = side.units.filter((ally) => ally.defId === summonDef.unitId && !ally.dead).length;
+      const availableSlots = Math.max(0, getArmyCap(side) - side.units.length);
+      const count = Math.min(summonDef.count, summonDef.maxActive - currentSummons, availableSlots);
+      if (count > 0) {
+        const direction = unit.side === 'player' ? 1 : -1;
+        for (let index = 0; index < count; index += 1) {
+          spawnUnit(side, summonDef.unitId, {
+            x: unit.x + direction * (28 + index * 20),
+            preferredY: unit.y + (index - 0.5) * 14,
+            command: unit.command === 'hold' ? 'hold' : 'attack',
+          });
+        }
+        unit.summonCooldown = summonDef.cooldown;
+        unit.attackTimer = 0.5;
+        unit.attackDuration = 0.5;
+        addRing(unit.x, unit.y - 18, '#c895ff', 12, 0.7);
+        addFloater(`召唤 ×${count}`, unit.x, unit.y - 82, '#e0b4ff', 15);
+      } else {
+        unit.summonCooldown = 1.5;
+      }
+    }
+  }
+
+  if (unit.def.heal && unit.healCooldown <= 0) {
+    const healDef = unit.def.heal;
+    const direction = unit.side === 'player' ? 1 : -1;
+    const targets = side.units
+      .filter((ally) => {
+        if (ally === unit || ally.dead || ally.hp >= ally.maxHp) return false;
+        const forward = (ally.x - unit.x) * direction;
+        return forward >= -18 && forward <= healDef.range && Math.abs(ally.y - unit.y) <= healDef.depth;
+      })
+      .sort((a, b) => a.hp / a.maxHp - b.hp / b.maxHp)
+      .slice(0, healDef.maxTargets);
+    if (targets.length > 0) {
+      for (const ally of targets) {
+        const healed = Math.min(healDef.amount, ally.maxHp - ally.hp);
+        ally.hp += healed;
+        addFloater(`+${Math.round(healed)}`, ally.x, ally.y - 65, '#67f0b2', 12);
+        addRing(ally.x, ally.y - 5, '#67f0b2', 9, 0.45);
+      }
+      unit.healCooldown = healDef.cooldown;
+      unit.attackTimer = 0.4;
+      unit.attackDuration = 0.4;
+      addParticles(unit.x, unit.y - 52, '#67f0b2', 12, { speed: 65 });
+    } else {
+      unit.healCooldown = 0.6;
+    }
+  }
+}
+
+function triggerFlashbang(unit, target) {
+  const flash = unit.def.flashbang;
+  if (!flash || !targetAlive(target)) return;
+  unit.flashCooldown = flash.cooldown;
+  spawnProjectile({
+    side: unit.side,
+    source: unit,
+    target,
+    x: unit.x,
+    y: unit.y - 52,
+    damage: flash.damage,
+    damageType: 'magic',
+    speed: 420,
+    color: '#fff2a8',
+    size: 7,
+    aoeRadius: flash.aoeRadius,
+    impact: flash.impact,
+    knockdownDuration: flash.knockdown,
+  });
+  addFloater('震爆弹', unit.x, unit.y - 84, '#ffe7a0', 14);
+}
+
+function performTailSweep(unit, side) {
+  const sweep = unit.def.tailSweep;
+  if (!sweep) return;
+  const enemy = otherSide(side);
+  for (const target of [...enemy.units]) {
+    if (!targetAlive(target) || target.def.flying) continue;
+    if (Math.abs(target.x - unit.x) > sweep.range || Math.abs(target.y - unit.y) > sweep.depth) continue;
+    const survived = dealDamage(unit, target, sweep.damage, 'melee');
+    if (survived) tryKnockdown(target, sweep.impact, sweep.knockdown);
+  }
+  unit.attackTimer = 0.45;
+  unit.attackDuration = 0.45;
+  addFloater('尾扫!', unit.x, unit.y - 92, '#ffb4e7', 18);
+  addRing(unit.x, unit.y - 5, '#e18dff', 24, 0.65);
+  addParticles(unit.x, unit.y - 18, '#cf9bff', 20, { speed: 130 });
+}
+
 function performAttack(unit, target) {
   const def = unit.def;
   unit.attackCooldown = def.attackInterval;
@@ -1572,6 +1703,8 @@ function resolveAttack(unit, attack) {
       color: def.projectileColor || '#f4d787',
       size: def.drawType === 'boneDragon' ? 8 : def.damageType === 'magic' ? 6 : 3,
       aoeRadius: def.aoeRadius || 0,
+      impact: def.projectileImpact || 0,
+      knockdownDuration: def.projectileKnockdown || 0,
     });
     return;
   }
@@ -1740,6 +1873,8 @@ function spawnProjectile(config) {
     color: config.color,
     size: config.size || 3,
     aoeRadius: config.aoeRadius || 0,
+    impact: config.impact || 0,
+    knockdownDuration: config.knockdownDuration || 0,
     life: 0,
   });
 }
@@ -1792,7 +1927,10 @@ function impactProjectile(projectile) {
     for (const unit of candidates) {
       if (!canTarget({ def: { damageType: 'explosive' } }, unit)) continue;
       if (Math.hypot(unit.x - target.x, unit.y - target.y) <= projectile.aoeRadius) {
-        dealDamage(projectile.source, unit, projectile.damage, projectile.damageType);
+        const survived = dealDamage(projectile.source, unit, projectile.damage, projectile.damageType);
+        if (survived && projectile.impact && projectile.knockdownDuration > 0) {
+          tryKnockdown(unit, projectile.impact, projectile.knockdownDuration);
+        }
       }
     }
     if (target.isBuilding) {
@@ -1803,7 +1941,10 @@ function impactProjectile(projectile) {
     return;
   }
 
-  dealDamage(projectile.source, target, projectile.damage, projectile.damageType);
+  const survived = dealDamage(projectile.source, target, projectile.damage, projectile.damageType);
+  if (survived && target.kind === 'unit' && projectile.impact && projectile.knockdownDuration > 0) {
+    tryKnockdown(target, projectile.impact, projectile.knockdownDuration);
+  }
   addParticles(target.x, target.y - (target.isBuilding ? target.height * 0.4 : 32), projectile.color, 8, {
     speed: 85,
     size: 2,
@@ -2010,6 +2151,37 @@ function aiChooseProduction() {
     const rotation = ['swordKnight', 'shieldKnight', 'lightCavalry', 'gunner', 'heavyCavalry', 'swordKnight'];
     const index = Math.floor(state.time / 10 + aiUnits.length) % rotation.length;
     ai.barracksUnit = state.time > 75 && ai.gold > 280 && paladins < 2 ? 'paladin' : rotation[index];
+    return;
+  }
+
+  if (ai.faction === 'arcane') {
+    const wizards = countType(aiUnits, (unit) => unit.defId === 'wizard');
+    const heras = countType(aiUnits, (unit) => unit.defId === 'hera');
+    const beasts = countType(aiUnits, (unit) => unit.defId === 'ancientBeast');
+    if (wizards < 2 && state.time > 18) {
+      ai.barracksUnit = 'wizard';
+    } else if (heras < 1 && state.time > 30) {
+      ai.barracksUnit = 'hera';
+    } else if (beasts < 1 && state.time > 75 && ai.gold > 280) {
+      ai.barracksUnit = 'ancientBeast';
+    } else {
+      const rotation = ['warlock', 'occultist', 'warlock', 'wizard', 'warlock'];
+      ai.barracksUnit = rotation[Math.floor(state.time / 7 + aiUnits.length) % rotation.length];
+    }
+    return;
+  }
+
+  if (ai.faction === 'special') {
+    const tanks = countType(aiUnits, (unit) => unit.defId === 'tank');
+    const helicopters = countType(aiUnits, (unit) => unit.defId === 'helicopter');
+    if (tanks < 1 && state.time > 60 && ai.gold > 240) {
+      ai.barracksUnit = 'tank';
+    } else if (helicopters < 1 && state.time > 90 && ai.gold > 260) {
+      ai.barracksUnit = 'helicopter';
+    } else {
+      const rotation = ['swat', 'riotPolice', 'specialForces', 'swat', 'riotPolice'];
+      ai.barracksUnit = rotation[Math.floor(state.time / 7 + aiUnits.length) % rotation.length];
+    }
     return;
   }
 
@@ -2591,8 +2763,12 @@ function drawBase(base) {
 
   if (base.faction === 'knight') {
     drawKnightBase(base);
-  } else {
+  } else if (base.faction === 'skeleton') {
     drawSkeletonBase(base);
+  } else if (base.faction === 'arcane') {
+    drawArcaneBase(base);
+  } else {
+    drawSpecialBase(base);
   }
   ctx.restore();
 
@@ -2726,13 +2902,19 @@ function drawBuilding(building) {
 
   if (building.type === 'mine') {
     if (building.faction === 'knight') drawKnightMine(building);
-    else drawSkeletonMine(building);
+    else if (building.faction === 'skeleton') drawSkeletonMine(building);
+    else if (building.faction === 'arcane') drawArcaneMine(building);
+    else drawSpecialMine(building);
   } else if (building.type === 'barracks') {
     if (building.faction === 'knight') drawKnightBarracks(building);
-    else drawSkeletonBarracks(building);
+    else if (building.faction === 'skeleton') drawSkeletonBarracks(building);
+    else if (building.faction === 'arcane') drawArcaneBarracks(building);
+    else drawSpecialBarracks(building);
   } else if (building.type === 'tower') {
     if (building.faction === 'knight') drawKnightTower(building);
-    else drawSkeletonTower(building);
+    else if (building.faction === 'skeleton') drawSkeletonTower(building);
+    else if (building.faction === 'arcane') drawArcaneTower(building);
+    else drawSpecialTower(building);
   }
 
   ctx.globalAlpha = 1;
@@ -2987,6 +3169,307 @@ function drawSkeletonTower(building) {
   ctx.fillRect(-30, -h - 20, 60, 60);
 }
 
+function drawArcaneBase(base) {
+  const h = base.height;
+  ctx.fillStyle = '#302640';
+  ctx.strokeStyle = '#211828';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-52, 0);
+  ctx.lineTo(-30, -h + 70);
+  ctx.lineTo(-8, -h + 28);
+  ctx.lineTo(16, -h + 12);
+  ctx.lineTo(43, -h + 58);
+  ctx.lineTo(56, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#58406e';
+  ctx.beginPath();
+  ctx.moveTo(0, -h + 54);
+  ctx.lineTo(25, -h + 92);
+  ctx.lineTo(5, -h + 132);
+  ctx.lineTo(-24, -h + 92);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#d88cff';
+  ctx.beginPath();
+  ctx.moveTo(0, -h + 68);
+  ctx.lineTo(12, -h + 92);
+  ctx.lineTo(0, -h + 115);
+  ctx.lineTo(-12, -h + 92);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(136, 255, 220, 0.8)';
+  ctx.beginPath();
+  ctx.arc(0, -h + 91, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#8fe8d0';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, -h + 92, 24, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawSpecialBase(base) {
+  const h = base.height;
+  ctx.fillStyle = '#43534a';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 3;
+  roundRectPath(-58, -h + 72, 116, h - 72, 9);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#5e7366';
+  roundRectPath(-49, -h + 86, 98, 52, 6);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#26362e';
+  ctx.fillRect(-17, -48, 34, 48);
+  ctx.beginPath();
+  ctx.arc(0, -48, 17, Math.PI, 0);
+  ctx.fill();
+  ctx.strokeStyle = '#92a89a';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, -h + 78);
+  ctx.lineTo(0, -h + 20);
+  ctx.moveTo(-18, -h + 50);
+  ctx.lineTo(18, -h + 50);
+  ctx.stroke();
+  ctx.fillStyle = '#e5b74d';
+  ctx.beginPath();
+  ctx.moveTo(36, -h + 75);
+  ctx.lineTo(36, -h + 133);
+  ctx.lineTo(64, -h + 119);
+  ctx.lineTo(36, -h + 105);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#768c7c';
+  for (let x = -44; x <= 44; x += 22) {
+    ctx.beginPath();
+    ctx.ellipse(x, -8, 13, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawArcaneMine(building) {
+  const h = building.height;
+  ctx.fillStyle = '#33263f';
+  ctx.strokeStyle = '#211828';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-30, 0);
+  ctx.lineTo(-18, -h + 52);
+  ctx.lineTo(0, -h + 32);
+  ctx.lineTo(19, -h + 54);
+  ctx.lineTo(30, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#9b69b8';
+  ctx.beginPath();
+  ctx.moveTo(0, -h + 9);
+  ctx.lineTo(18, -h + 41);
+  ctx.lineTo(0, -h + 72);
+  ctx.lineTo(-18, -h + 41);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#e8a8ff';
+  ctx.beginPath();
+  ctx.arc(0, -h + 40, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(141, 255, 221, 0.7)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, -h + 40, 23, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+function drawSpecialMine(building) {
+  const h = building.height;
+  ctx.fillStyle = '#56675d';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 3;
+  roundRectPath(-38, -20, 76, 20, 4);
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = '#3f5148';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(-28, -18);
+  ctx.lineTo(-12, -h + 20);
+  ctx.lineTo(12, -h + 20);
+  ctx.lineTo(28, -18);
+  ctx.moveTo(-19, -h * 0.58);
+  ctx.lineTo(19, -h * 0.58);
+  ctx.moveTo(0, -h + 20);
+  ctx.lineTo(0, -h * 0.58);
+  ctx.stroke();
+  ctx.fillStyle = '#96a59c';
+  ctx.beginPath();
+  ctx.arc(0, -h * 0.58, 17, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(-17, -h * 0.58);
+  ctx.lineTo(17, -h * 0.58);
+  ctx.moveTo(0, -h * 0.58 - 17);
+  ctx.lineTo(0, -h * 0.58 + 17);
+  ctx.stroke();
+  ctx.fillStyle = '#e6b84d';
+  ctx.beginPath();
+  ctx.arc(25, -h + 16, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawArcaneBarracks(building) {
+  const h = building.height;
+  ctx.fillStyle = '#2e253b';
+  ctx.strokeStyle = '#211828';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(0, -12, 54, 23, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = '#9b77bf';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.arc(0, -h * 0.55, 35, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = '#6fd7c2';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, -h * 0.55, 45, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = '#8b5cab';
+  ctx.beginPath();
+  ctx.moveTo(-27, 0);
+  ctx.lineTo(-21, -h * 0.38);
+  ctx.lineTo(0, -h * 0.25);
+  ctx.lineTo(21, -h * 0.38);
+  ctx.lineTo(27, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#d899ff';
+  ctx.beginPath();
+  ctx.moveTo(0, -h * 0.36);
+  ctx.lineTo(13, -h * 0.5);
+  ctx.lineTo(0, -h * 0.64);
+  ctx.lineTo(-13, -h * 0.5);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawSpecialBarracks(building) {
+  const h = building.height;
+  ctx.fillStyle = '#4b6253';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-52, 0);
+  ctx.lineTo(-45, -h * 0.52);
+  ctx.lineTo(0, -h * 0.78);
+  ctx.lineTo(45, -h * 0.52);
+  ctx.lineTo(52, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#738b79';
+  ctx.beginPath();
+  ctx.moveTo(-57, -h * 0.47);
+  ctx.lineTo(0, -h * 0.84);
+  ctx.lineTo(57, -h * 0.47);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#26342c';
+  ctx.fillRect(-14, -40, 28, 40);
+  ctx.strokeStyle = '#a8b8aa';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(24, -h * 0.58);
+  ctx.lineTo(24, -h + 16);
+  ctx.moveTo(14, -h * 0.58);
+  ctx.lineTo(34, -h * 0.58);
+  ctx.stroke();
+  ctx.fillStyle = '#e6b84d';
+  ctx.beginPath();
+  ctx.arc(24, -h + 13, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawArcaneTower(building) {
+  const h = building.height;
+  ctx.fillStyle = '#392b48';
+  ctx.strokeStyle = '#211828';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-24, 0);
+  ctx.lineTo(-14, -h + 35);
+  ctx.lineTo(0, -h + 7);
+  ctx.lineTo(15, -h + 38);
+  ctx.lineTo(24, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#ad78ca';
+  ctx.beginPath();
+  ctx.moveTo(0, -h + 22);
+  ctx.lineTo(14, -h + 55);
+  ctx.lineTo(0, -h + 92);
+  ctx.lineTo(-14, -h + 55);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(124, 241, 210, 0.8)';
+  ctx.beginPath();
+  ctx.arc(0, -h + 57, 5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawSpecialTower(building) {
+  const h = building.height;
+  ctx.fillStyle = '#52645a';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 3;
+  roundRectPath(-27, -h * 0.6, 54, 52, 6);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#38473f';
+  ctx.fillRect(-18, -h * 0.43, 36, 18);
+  ctx.strokeStyle = '#2b3831';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(-18, 0);
+  ctx.lineTo(-12, -h * 0.6);
+  ctx.moveTo(18, 0);
+  ctx.lineTo(12, -h * 0.6);
+  ctx.stroke();
+  ctx.fillStyle = '#1e2b25';
+  roundRectPath(-16, -h * 0.72, 38, 16, 5);
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = '#d3ddcf';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(16, -h * 0.67);
+  ctx.lineTo(49, -h * 0.67);
+  ctx.stroke();
+  ctx.fillStyle = '#e6b84d';
+  ctx.beginPath();
+  ctx.arc(0, -h * 0.6, 4, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 function drawBuildingLabel(building, color) {
   if (selectedBuilding !== building) return;
   const label = building.isBase ? building.name : `${building.name} Lv.${building.level}`;
@@ -3131,6 +3614,39 @@ function drawUnit(unit, time) {
       break;
     case 'boneDragon':
       drawBoneDragon(unit, time);
+      break;
+    case 'warlock':
+      drawWarlock(unit, time);
+      break;
+    case 'wizard':
+      drawWizard(unit, time);
+      break;
+    case 'occultist':
+      drawOccultist(unit, time);
+      break;
+    case 'hera':
+      drawHera(unit, time);
+      break;
+    case 'ancientBeast':
+      drawAncientBeast(unit, time);
+      break;
+    case 'soulSword':
+      drawSoulSwordsman(unit, time);
+      break;
+    case 'swat':
+      drawSwat(unit, time);
+      break;
+    case 'riotPolice':
+      drawRiotPolice(unit, time);
+      break;
+    case 'specialForces':
+      drawSpecialForces(unit, time);
+      break;
+    case 'tank':
+      drawTank(unit, time);
+      break;
+    case 'helicopter':
+      drawHelicopter(unit, time);
       break;
     default:
       break;
@@ -4013,6 +4529,497 @@ function drawBoneDragon(unit, time) {
   }
   ctx.restore();
 }
+function drawArcaneCaster(unit, palette, variant) {
+  const phase = unit.walkPhase;
+  const move = unit.moveBlend;
+  const stride = Math.sin(phase) * 3 * move;
+  const cast = attackSwingCurve(unit);
+  const pulse = attackPulse(unit);
+  const ink = '#241a13';
+
+  ctx.save();
+  ctx.translate(0, -Math.abs(Math.sin(phase)) * 1.2 * move);
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 3;
+  ctx.fillStyle = palette.robe;
+  ctx.beginPath();
+  ctx.moveTo(-15 + stride, 0);
+  ctx.lineTo(-9, -45);
+  ctx.quadraticCurveTo(0, -56, 9, -45);
+  ctx.lineTo(15 - stride, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = palette.trim;
+  ctx.beginPath();
+  ctx.moveTo(-11, -8);
+  ctx.lineTo(11, -8);
+  ctx.lineTo(14 - stride, 0);
+  ctx.lineTo(-15 + stride, 0);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = palette.hood;
+  ctx.beginPath();
+  ctx.moveTo(-14, -43);
+  ctx.quadraticCurveTo(0, -68, 14, -43);
+  ctx.lineTo(9, -34);
+  ctx.quadraticCurveTo(0, -43, -9, -34);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#d8cbdc';
+  ctx.beginPath();
+  ctx.arc(0, -47, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = palette.glow;
+  ctx.beginPath();
+  ctx.arc(-2.6, -48, 1.8, 0, Math.PI * 2);
+  ctx.arc(2.6, -48, 1.8, 0, Math.PI * 2);
+  ctx.fill();
+
+  if (variant === 'wizard') {
+    ctx.fillStyle = palette.trim;
+    ctx.beginPath();
+    ctx.moveTo(-17, -58);
+    ctx.lineTo(1, -91);
+    ctx.lineTo(16, -58);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  } else if (variant === 'warlock') {
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(-8, -54);
+    ctx.quadraticCurveTo(-19, -67, -13, -77);
+    ctx.moveTo(8, -54);
+    ctx.quadraticCurveTo(19, -67, 13, -77);
+    ctx.stroke();
+    ctx.strokeStyle = palette.trim;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+  } else if (variant === 'hera') {
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.arc(0, -66, 13, Math.PI, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = '#f2d77f';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  ctx.save();
+  ctx.translate(11, -37);
+  ctx.rotate(-0.13 - cast * 0.18 - pulse * 0.08);
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(0, 4);
+  ctx.lineTo(12, -31);
+  ctx.stroke();
+  ctx.strokeStyle = palette.trim;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 4);
+  ctx.lineTo(12, -31);
+  ctx.stroke();
+  ctx.fillStyle = palette.glow;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(12, -35, 6 + pulse * 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  if (pulse > 0.18 || variant === 'wizard') {
+    ctx.strokeStyle = `${palette.glow}88`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(12, -35, 13 + pulse * 11, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawWarlock(unit, time) {
+  drawArcaneCaster(unit, { robe: '#4a335f', trim: '#a876d1', hood: '#332442', glow: '#d58cff' }, 'warlock');
+}
+
+function drawWizard(unit, time) {
+  drawArcaneCaster(unit, { robe: '#3c4b79', trim: '#8dc7ff', hood: '#28375d', glow: '#90e7ff' }, 'wizard');
+}
+
+function drawOccultist(unit, time) {
+  drawArcaneCaster(unit, { robe: '#5b2b55', trim: '#e09bff', hood: '#3c1d3d', glow: '#ff8ff1' }, 'occultist');
+  ctx.save();
+  ctx.translate(0, -70);
+  ctx.strokeStyle = 'rgba(255, 151, 243, 0.7)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, 0, 13 + Math.sin(time * 3 + unit.bobSeed) * 2, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, 0, 8, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHera(unit, time) {
+  drawArcaneCaster(unit, { robe: '#e2d7bd', trim: '#e5bd61', hood: '#bda56c', glow: '#8dffd7' }, 'hera');
+}
+
+function drawSoulSwordsman(unit, time) {
+  ctx.save();
+  ctx.globalAlpha = 0.84;
+  drawSkeletonFrame(unit, '#bffcff');
+  const swing = attackSwingCurve(unit);
+  ctx.translate(3, -36);
+  ctx.rotate(-0.2 + swing * 0.9);
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(29, 0);
+  ctx.stroke();
+  ctx.strokeStyle = '#d7ffff';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(29, 0);
+  ctx.stroke();
+  ctx.strokeStyle = '#8cf5ee';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(9, -1, 23, -0.9, 0.4);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawAncientBeast(unit, time) {
+  const phase = unit.walkPhase;
+  const move = unit.moveBlend;
+  const stride = Math.sin(phase) * 5 * move;
+  const cast = attackPulse(unit);
+  const ink = '#241a13';
+  const body = '#6f477e';
+  const spine = '#d9b5e7';
+
+  ctx.save();
+  ctx.translate(0, -Math.abs(Math.sin(phase)) * 2 * move);
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 8;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(-20, -24);
+  ctx.lineTo(-28 + stride, 0);
+  ctx.moveTo(-2, -25);
+  ctx.lineTo(4 - stride, 0);
+  ctx.moveTo(27, -24);
+  ctx.lineTo(34 + stride, 0);
+  ctx.moveTo(39, -25);
+  ctx.lineTo(47 - stride, 0);
+  ctx.stroke();
+
+  ctx.fillStyle = body;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.ellipse(2, -40, 43, 25, -0.08, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.ellipse(44, -54, 20, 16, 0.18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = spine;
+  for (let index = -2; index <= 2; index += 1) {
+    ctx.beginPath();
+    ctx.moveTo(index * 15, -61);
+    ctx.lineTo(index * 15 - 5, -79);
+    ctx.lineTo(index * 15 + 5, -63);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = '#f1d7ff';
+  ctx.beginPath();
+  ctx.arc(51, -61, 4 + cast * 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  if (cast > 0.12) {
+    ctx.strokeStyle = `rgba(255, 126, 235, ${0.55 * cast})`;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(51, -61, 15 + cast * 18, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  const tailAngle = Math.sin(phase) * 0.12 * move - attackPulse(unit) * 0.55;
+  ctx.save();
+  ctx.translate(-38, -38);
+  ctx.rotate(tailAngle);
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 10;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.quadraticCurveTo(-35, -18, -57, 2);
+  ctx.stroke();
+  ctx.strokeStyle = '#b48bc3';
+  ctx.lineWidth = 5;
+  ctx.stroke();
+  ctx.fillStyle = spine;
+  ctx.beginPath();
+  ctx.moveTo(-56, -2);
+  ctx.lineTo(-73, 1);
+  ctx.lineTo(-58, 9);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawSwat(unit, time) {
+  const colors = { body: '#293b42', armor: '#52656b', legs: '#20282c', skin: '#d4b193', helmet: '#37494f', visor: '#10171a' };
+  drawHumanoidBase(colors, unit, 1.04);
+  const brace = Math.sin(unit.walkPhase) * 0.05 * unit.moveBlend + attackPulse(unit) * 0.1;
+  const swing = attackSwingCurve(unit);
+  ctx.save();
+  ctx.translate(14, -34);
+  ctx.rotate(-0.08 + brace);
+  ctx.fillStyle = '#d9e0dd';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-3, -15);
+  ctx.lineTo(12, -10);
+  ctx.lineTo(13, 10);
+  ctx.quadraticCurveTo(3, 20, -4, 12);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#4c6870';
+  ctx.fillRect(2, -8, 7, 17);
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(8, -34);
+  ctx.rotate(-0.5 + swing * 0.9);
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(32, 0);
+  ctx.stroke();
+  ctx.strokeStyle = '#b9c5c8';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(32, 0);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRiotPolice(unit, time) {
+  const colors = { body: '#2f4350', armor: '#607985', legs: '#24313a', skin: '#d9b59a', helmet: '#445a65', visor: '#131b20' };
+  drawHumanoidBase(colors, unit, 0.98);
+  const recoil = attackPulse(unit) * 4;
+  ctx.save();
+  ctx.translate(5 - recoil, -38);
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(0, 4);
+  ctx.lineTo(29, -5);
+  ctx.stroke();
+  ctx.strokeStyle = '#c4d0d2';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, 4);
+  ctx.lineTo(29, -5);
+  ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle = '#e3bd58';
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(-13, -42, 7, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#4d5660';
+  ctx.fillRect(-16, -48, 6, 5);
+}
+
+function drawSpecialForces(unit, time) {
+  const colors = { body: '#344d43', armor: '#667f70', legs: '#26352f', skin: '#d0a98d', helmet: '#42584c', visor: '#101713' };
+  drawHumanoidBase(colors, unit, 1.0);
+  const recoil = attackPulse(unit) * 3;
+  ctx.save();
+  ctx.translate(4 - recoil, -39);
+  ctx.strokeStyle = '#241a13';
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(-3, 4);
+  ctx.lineTo(43, -5);
+  ctx.stroke();
+  ctx.strokeStyle = '#48544d';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(-3, 4);
+  ctx.lineTo(43, -5);
+  ctx.stroke();
+  ctx.strokeStyle = '#d9dfd9';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(22, 0);
+  ctx.lineTo(46, -6);
+  ctx.stroke();
+  ctx.fillStyle = '#1d2521';
+  ctx.fillRect(5, 7, 10, 7);
+  if (unit.attackTimer > 0) {
+    ctx.fillStyle = '#ffe28a';
+    ctx.beginPath();
+    ctx.arc(48, -6, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+  ctx.strokeStyle = '#1c2621';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-12, -45);
+  ctx.lineTo(-17, -29);
+  ctx.moveTo(11, -45);
+  ctx.lineTo(17, -30);
+  ctx.stroke();
+}
+
+function drawTank(unit, time) {
+  const recoil = attackPulse(unit) * 8;
+  const ink = '#241a13';
+  ctx.save();
+  ctx.fillStyle = '#26302c';
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 3;
+  roundRectPath(-46, -20, 92, 20, 8);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#53655b';
+  roundRectPath(-43, -36, 84, 21, 7);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#415047';
+  roundRectPath(-24, -52, 50, 20, 8);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#2d3933';
+  ctx.fillRect(-12, -57, 25, 8);
+  ctx.save();
+  ctx.translate(18, -45);
+  ctx.rotate(-0.04 + attackPulse(unit) * 0.025);
+  ctx.fillStyle = '#6b7e72';
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 3;
+  roundRectPath(-5, -6, 56, 12, 4);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#2d3933';
+  ctx.fillRect(38, -4, 23, 8);
+  ctx.restore();
+  for (const x of [-32, 0, 32]) {
+    ctx.beginPath();
+    ctx.arc(x, -10, 8, 0, Math.PI * 2);
+    ctx.fillStyle = '#7b8d83';
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.translate(-recoil, 0);
+  ctx.restore();
+}
+
+function drawHelicopter(unit, time) {
+  const rotor = time * 28 + unit.bobSeed;
+  const ink = '#241a13';
+  ctx.save();
+  ctx.translate(0, -20);
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(-48, 8);
+  ctx.lineTo(35, 8);
+  ctx.moveTo(-28, 10);
+  ctx.lineTo(-28, 22);
+  ctx.moveTo(12, 10);
+  ctx.lineTo(12, 22);
+  ctx.moveTo(-34, 24);
+  ctx.lineTo(-20, 24);
+  ctx.moveTo(4, 24);
+  ctx.lineTo(18, 24);
+  ctx.stroke();
+
+  ctx.fillStyle = '#4b6756';
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(-5, -3, 38, 17, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(38, -7, 17, 9, 0.1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#25352d';
+  ctx.beginPath();
+  ctx.ellipse(32, -9, 11, 7, 0.1, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.strokeStyle = '#3d4c44';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-30, -10);
+  ctx.lineTo(-30, -40);
+  ctx.moveTo(18, -10);
+  ctx.lineTo(18, -40);
+  ctx.stroke();
+
+  ctx.save();
+  ctx.translate(-6, -45);
+  ctx.rotate(rotor * 0.08);
+  ctx.strokeStyle = '#20251f';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(-48, 0);
+  ctx.lineTo(48, 0);
+  ctx.moveTo(0, -10);
+  ctx.lineTo(0, 10);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.strokeStyle = '#8affb0';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(46, -8);
+  ctx.lineTo(67, -8);
+  ctx.stroke();
+  ctx.fillStyle = '#ffe47b';
+  if (unit.attackTimer > 0) {
+    ctx.beginPath();
+    ctx.arc(69, -8, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawProjectiles() {
   if (!state) return;
   for (const projectile of state.projectiles) {
