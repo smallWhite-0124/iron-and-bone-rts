@@ -1552,6 +1552,8 @@ function updateUnits(side, dt) {
       }
     }
 
+    if (unit.tailSlamTimer > 0 && unit.command !== 'retreat') continue;
+
     if (unit.downTimer > 0) {
       unit.target = null;
       unit.detour = null;
@@ -1598,21 +1600,35 @@ function updateUnits(side, dt) {
     const distance = Math.hypot(dx, dy);
     const reach = unit.def.range + targetHalfWidth;
 
-    if (distance > reach) {
-      if (unit.command === 'hold') {
-        unit.target = null;
-        continue;
-      }
+    const tailRange = unit.def.tailSweep?.range || 0;
+    const wantsToClose = Boolean(unit.def.advanceWhileAttacking)
+      && unit.command === 'attack'
+      && tailRange > 0
+      && distance > tailRange - 8;
+    const tailReady = Boolean(unit.def.tailSweep)
+      && unit.sweepCooldown <= 0
+      && !unit.pendingAttack
+      && distance <= tailRange;
+
+    if (tailReady) {
+      performTailSweep(unit, side);
+      unit.sweepCooldown = unit.def.tailSweep.cooldown;
+      unit.attackCooldown = 0.85;
+      continue;
+    }
+
+    if (distance > reach && unit.command === 'hold') {
+      unit.target = null;
+      continue;
+    }
+
+    if (distance > reach || wantsToClose) {
       moveUnit(unit, dx, dy, dt, true);
-    } else {
+    }
+
+    if (distance <= reach) {
       if (unit.def.flashbang && unit.flashCooldown <= 0 && distance <= unit.def.flashbang.range) {
         triggerFlashbang(unit, target);
-      }
-      if (unit.def.tailSweep && unit.sweepCooldown <= 0 && distance <= unit.def.tailSweep.range) {
-        performTailSweep(unit, side);
-        unit.sweepCooldown = unit.def.tailSweep.cooldown;
-        unit.attackCooldown = 0.85;
-        continue;
       }
       if (unit.attackCooldown <= 0) {
         performAttack(unit, target);
