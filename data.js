@@ -235,12 +235,12 @@ export const UNIT_DEFS = {
     description: '自动治疗前方一定范围内的友军。',
   },
   ancientBeast: {
-    id: 'ancientBeast', faction: 'arcane', name: '远古巨兽', role: '巨型范围',
+    id: 'ancientBeast', faction: 'arcane', name: '远古巨兽', role: '推进范围',
     cost: 330, trainTime: 7, hp: 680, damage: 48, attackInterval: 2.2, range: 330, speed: 31,
     mass: 5, radius: 32, damageType: 'magic', aggro: 600, drawType: 'ancientBeast',
-    projectileSpeed: 280, projectileColor: '#ff93ec', aoeRadius: 92,
-    tailSweep: { damage: 34, range: 96, depth: 62, cooldown: 8, impact: 4, knockdown: 1.15 },
-    description: '激光造成范围伤害，近距离会自动用尾部横扫并击倒敌人。',
+    projectileSpeed: 280, projectileColor: '#ff93ec', aoeRadius: 92, advanceWhileAttacking: true,
+    tailSweep: { damage: 72, range: 96, depth: 62, cooldown: 7, impact: 5, knockdown: 1.3 },
+    description: '边前进边发射范围激光，贴近后以强力尾击劈倒敌人。',
   },
   soulSwordsman: {
     id: 'soulSwordsman', faction: 'arcane', name: '灵魂剑士', role: '召唤近战',
