@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0d13">
+  <title>铁与骨：横版战争</title>
+  <link rel="icon" href="data:,"><link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="app" aria-label="铁与骨横版 RTS 游戏">
+    <canvas id="gameCanvas" width="1600" height="900" aria-label="横版战场"></canvas>
+
+    <div id="hud">
+      <section class="status-card player-status" aria-label="玩家状态">
+        <div class="status-heading">
+          <span id="playerFaction" class="faction-name">骑士团</span>
+          <span class="hp-label">基地</span>
+        </div>
+        <div class="bar-track"><i id="playerBaseBar" class="bar-fill player-fill"></i></div>
+        <div class="status-line">
+          <span id="playerBaseHp">2500 / 2500</span>
+          <span id="playerArmy">0 / 24</span>
+        </div>
+      </section>
+
+      <section class="center-status" aria-label="对局状态">
+        <div class="match-clock" id="matchClock">00:00</div>
+        <div class="economy-lines">
+          <span class="resource-pill"><b id="goldAmount">220</b> 资源</span>
+          <span class="income-pill">+<b id="incomeAmount">0</b>/秒</span>
+        </div>
+        <div class="center-buttons">
+          <button id="pauseBtn" class="mini-btn" type="button">暂停</button>
+          <button id="speedBtn" class="mini-btn" type="button">1×</button>
+        </div>
+      </section>
+
+      <section class="status-card enemy-status" aria-label="敌方状态">
+        <div class="status-heading">
+          <span class="hp-label">基地</span>
+          <span id="enemyFaction" class="faction-name">骷髅族</span>
+        </div>
+        <div class="bar-track"><i id="enemyBaseBar" class="bar-fill enemy-fill"></i></div>
+        <div class="status-line">
+          <span id="enemyArmy">0 / 24</span>
+          <span id="enemyBaseHp">2500 / 2500</span>
+        </div>
+      </section>
+
+      <div id="hintBar" class="hint-bar">建筑卡自由放置，兵种卡每次训练一个。右键己方建筑可拆除并返还 50%。方向键或滚轮移动镜头。</div>
+
+      <section class="bottom-dock" aria-label="游戏控制">
+        <div class="build-panel">
+          <div class="panel-title">建筑</div>
+          <div id="buildCards" class="build-cards">
+            <button class="build-card" type="button" data-building="mine">
+              <span class="card-icon mine-icon">◆</span>
+              <span class="card-copy"><b data-role="building-name">矿机</b><small><span data-role="building-cost">80</span> 资源</small></span>
+            </button>
+            <button class="build-card" type="button" data-building="barracks">
+              <span class="card-icon barracks-icon">▥</span>
+              <span class="card-copy"><b data-role="building-name">兵营</b><small><span data-role="building-cost">120</span> 资源</small></span>
+            </button>
+            <button class="build-card" type="button" data-building="tower">
+              <span class="card-icon tower-icon">♜</span>
+              <span class="card-copy"><b data-role="building-name">炮台</b><small><span data-role="building-cost">100</span> 资源</small></span>
+            </button>
+          </div>
+          <div id="buildHint" class="micro-copy">选择建筑后点击己方领地内的空地；右键可拆除已有建筑</div>
+        </div>
+
+        <div class="army-panel">
+          <div class="selection-panel">
+            <div id="selectionTitle" class="selection-title">尚未选择</div>
+            <div id="selectionSub" class="selection-sub">长按左键自由圈选己方士兵</div>
+            <div id="selectionActions" class="selection-actions"></div>
+          </div>
+          <div class="production-wrap">
+            <div class="panel-title">兵营训练 · 点击一次生产一个</div>
+            <div id="unitButtons" class="unit-buttons"></div>
+          </div>
+        </div>
+
+        <div class="command-panel">
+          <div class="panel-title">部队指令</div>
+          <div class="command-buttons">
+            <button class="command-btn attack-btn" type="button" data-command="attack" disabled>
+              <span class="command-key">A</span><b>进攻</b><small>向前推进</small>
+            </button>
+            <button class="command-btn hold-btn" type="button" data-command="hold" disabled>
+              <span class="command-key">H</span><b>驻守</b><small>原地防守</small>
+            </button>
+            <button class="command-btn retreat-btn" type="button" data-command="retreat" disabled>
+              <span class="command-key">R</span><b>撤退</b><small>返回基地</small>
+            </button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast" aria-live="polite"></div>
+
+    <section id="startScreen" class="overlay visible" aria-label="开始界面">
+      <div class="start-card">
+        <div class="eyebrow">2.5D SIDE-VIEW RTS</div>
+        <h1>铁与骨<span>横版战争</span></h1>
+        <p class="tagline">自动经济 · 2.5D 纵深 · 三指令军团</p>
+        <div class="faction-picker" role="radiogroup" aria-label="选择阵营">
+          <button class="faction-choice selected" type="button" data-faction="knight">
+            <span class="faction-emblem">♞</span>
+            <b>骑士团</b>
+            <small>重甲 · 冲锋 · 火枪</small>
+          </button>
+          <button class="faction-choice" type="button" data-faction="skeleton">
+            <span class="faction-emblem">☠</span>
+            <b>骷髅族</b>
+            <small>数量 · 复活 · 控制</small>
+          </button>
+        </div>
+        <div class="start-controls">
+          <span><b>长按左键</b> 自由圈选</span>
+          <span><b>← → / 滚轮</b> 移动镜头</span>
+          <span><b>右键建筑</b> 拆除并返还50%</span>
+          <span><b>A</b> 进攻</span>
+          <span><b>H</b> 驻守</span>
+          <span><b>R</b> 撤退</span>
+        </div>
+        <button id="startBtn" class="start-btn" type="button">开始战斗</button>
+      </div>
+    </section>
+
+    <section id="endScreen" class="overlay" aria-label="战斗结束">
+      <div class="end-card">
+        <div id="endEyebrow" class="eyebrow">BATTLE COMPLETE</div>
+        <h2 id="endTitle">胜利</h2>
+        <p id="endDescription">敌方基地已被摧毁。</p>
+        <button id="restartBtn" class="start-btn" type="button">再来一局</button>
+      </div>
+    </section>
+
+    <div id="pauseOverlay" class="pause-overlay">
+      <div class="pause-label">战斗暂停</div>
+      <div class="micro-copy">按空格或点击顶部“继续”恢复</div>
+    </div>
+
+    <div id="errorOverlay" class="error-overlay"></div>
+  </main>
+
+  <script type="module" src="game.js"></script>
+</body>
+</html>
+
+
