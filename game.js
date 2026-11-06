@@ -77,7 +77,11 @@ let hudAccumulator = 0;
 let lastFrameTime = performance.now();
 let nextId = 1;
 let frameFailure = false;
-const TARGET_FRAME_MS = 1000 / 60;
+const FRAME_60_MS = 1000 / 60;
+const FRAME_30_MS = 1000 / 30;
+let targetFrameMs = FRAME_60_MS;
+let slowFrameScore = 0;
+let fastFrameScore = 0;
 const MAX_PARTICLES = 420;
 const AUTOSAVE_KEY_PREFIX = 'iron-and-bone-rts.autosave.v2:';
 const LEGACY_AUTOSAVE_KEY = 'iron-and-bone-rts.autosave.v1';
@@ -96,7 +100,7 @@ const tabSessionId = (() => {
   }
 })();
 const autosaveKey = () => `${AUTOSAVE_KEY_PREFIX}${tabSessionId}`;
-const AUTOSAVE_INTERVAL = 1.5;
+const AUTOSAVE_INTERVAL = 2.5;
 const AUTOSAVE_MAX_AGE = 24 * 60 * 60 * 1000;
 let autosaveAccumulator = 0;
 let restoringSave = false;
@@ -106,6 +110,9 @@ let soundEnabled = true;
 let audioContext = null;
 let lastCombatSoundAt = 0;
 let lastFootstepSoundAt = 0;
+let sharedNoiseBuffer = null;
+const activeAudioVoices = new Set();
+const MAX_AUDIO_VOICES = 18;
 
 const backgroundSeeds = Array.from({ length: 180 }, (_, index) => {
   const seed = (index * 16807 + 77) % 2147483647;
@@ -168,8 +175,15 @@ function audioReady() {
   return soundEnabled && audioContext && audioContext.state === 'running';
 }
 
+function releaseAudioVoice(source, nodes) {
+  activeAudioVoices.delete(source);
+  for (const node of nodes) {
+    try { node.disconnect(); } catch { /* Already disconnected. */ }
+  }
+}
+
 function playTone(frequency, duration, volume, type = 'sine', endFrequency = frequency, delay = 0) {
-  if (!audioReady()) return;
+  if (!audioReady() || activeAudioVoices.size >= MAX_AUDIO_VOICES) return;
   const now = audioContext.currentTime + delay;
   const oscillator = audioContext.createOscillator();
   const gain = audioContext.createGain();
@@ -179,20 +193,31 @@ function playTone(frequency, duration, volume, type = 'sine', endFrequency = fre
   gain.gain.setValueAtTime(Math.max(0.0001, volume), now);
   gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
   oscillator.connect(gain).connect(audioContext.destination);
+  activeAudioVoices.add(oscillator);
+  const cleanupTone = () => releaseAudioVoice(oscillator, [oscillator, gain]);
+  oscillator.onended = cleanupTone;
+  window.setTimeout(cleanupTone, (delay + duration + 0.25) * 1000);
   oscillator.start(now);
   oscillator.stop(now + duration + 0.02);
 }
 
-function playNoise(duration, volume, cutoff = 900, delay = 0) {
-  if (!audioReady()) return;
-  const now = audioContext.currentTime + delay;
-  const sampleCount = Math.max(1, Math.floor(audioContext.sampleRate * duration));
-  const buffer = audioContext.createBuffer(1, sampleCount, audioContext.sampleRate);
-  const data = buffer.getChannelData(0);
+function getSharedNoiseBuffer() {
+  if (!audioContext) return null;
+  if (sharedNoiseBuffer && sharedNoiseBuffer.sampleRate === audioContext.sampleRate) return sharedNoiseBuffer;
+  const sampleCount = Math.max(1, Math.floor(audioContext.sampleRate * 0.5));
+  sharedNoiseBuffer = audioContext.createBuffer(1, sampleCount, audioContext.sampleRate);
+  const data = sharedNoiseBuffer.getChannelData(0);
   for (let index = 0; index < sampleCount; index += 1) {
-    const envelope = 1 - index / sampleCount;
-    data[index] = (Math.random() * 2 - 1) * envelope;
+    data[index] = Math.random() * 2 - 1;
   }
+  return sharedNoiseBuffer;
+}
+
+function playNoise(duration, volume, cutoff = 900, delay = 0) {
+  if (!audioReady() || activeAudioVoices.size >= MAX_AUDIO_VOICES) return;
+  const buffer = getSharedNoiseBuffer();
+  if (!buffer) return;
+  const now = audioContext.currentTime + delay;
   const source = audioContext.createBufferSource();
   const filter = audioContext.createBiquadFilter();
   const gain = audioContext.createGain();
@@ -202,7 +227,12 @@ function playNoise(duration, volume, cutoff = 900, delay = 0) {
   gain.gain.setValueAtTime(volume, now);
   gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
   source.connect(filter).connect(gain).connect(audioContext.destination);
-  source.start(now);
+  activeAudioVoices.add(source);
+  const cleanupNoise = () => releaseAudioVoice(source, [source, filter, gain]);
+  source.onended = cleanupNoise;
+  window.setTimeout(cleanupNoise, (delay + duration + 0.25) * 1000);
+  const maxOffset = Math.max(0, buffer.duration - duration - 0.02);
+  source.start(now, rand(0, maxOffset), duration);
   source.stop(now + duration + 0.02);
 }
 
@@ -579,6 +609,9 @@ function startGame(factionId = selectedFaction, options = {}) {
   camera.shakePhase = 0;
   hitStopTimer = 0;
   hitStopCooldown = 0;
+  targetFrameMs = FRAME_60_MS;
+  slowFrameScore = 0;
+  fastFrameScore = 0;
   pressedKeys.clear();
   paused = false;
   gameSpeed = 1;
@@ -1118,10 +1151,11 @@ function tryPlaceBuilding(side, type, x, y, isPlayerAction = false) {
 }
 
 function getArmyCap(side) {
-  return side.buildings.reduce((cap, building) => {
-    if (building.dead || !building.completed || building.type !== 'barracks') return cap;
-    return cap + WORLD.barracksBaseCap + (building.level - 1) * WORLD.barracksCapPerLevel;
+  const cap = side.buildings.reduce((total, building) => {
+    if (building.dead || !building.completed || building.type !== 'barracks') return total;
+    return total + WORLD.barracksBaseCap + (building.level - 1) * WORLD.barracksCapPerLevel;
   }, WORLD.baseArmyCap);
+  return Math.min(72, cap);
 }
 function incomeForSide(side) {
   return side.buildings.reduce((total, building) => {
@@ -1992,6 +2026,7 @@ function fireAncientBeam(unit, target, attack) {
     maxLife: 0.26,
     seed: rand(0, Math.PI * 2),
   });
+  if (state.beams.length > 40) state.beams.splice(0, state.beams.length - 40);
 
   const enemy = otherSide(sideById(unit.side));
   for (const victim of [...enemy.units]) {
@@ -2351,6 +2386,7 @@ function spawnProjectile(config) {
     knockdownDuration: config.knockdownDuration || 0,
     life: 0,
   });
+  if (state.projectiles.length > 300) state.projectiles.splice(0, state.projectiles.length - 300);
 }
 
 function updateProjectiles(dt) {
@@ -2753,6 +2789,7 @@ function addFloater(text, x, y, color, size = 13) {
 function addRing(x, y, color, radius = 10, duration = 0.6) {
   if (!state) return;
   state.commandBursts.push({ id: uid('ring'), x, y, color, radius, life: duration, maxLife: duration });
+  if (state.commandBursts.length > 120) state.commandBursts.splice(0, state.commandBursts.length - 120);
 }
 
 function updateEffects(dt) {
@@ -7461,6 +7498,9 @@ function drawHelicopter(unit, time) {
 function drawBeams() {
   if (!state) return;
   for (const beam of state.beams) {
+    const minBeamX = Math.min(beam.startX, beam.endX);
+    const maxBeamX = Math.max(beam.startX, beam.endX);
+    if (maxBeamX < camera.x - 100 || minBeamX > camera.x + WORLD.viewWidth + 100) continue;
     const progress = 1 - beam.life / beam.maxLife;
     const alpha = Math.max(0, 1 - progress);
     const flicker = 0.85 + Math.sin(performance.now() * 0.06 + beam.seed) * 0.15;
@@ -7495,9 +7535,14 @@ function drawBeams() {
   }
 }
 
+function isVisibleWorldX(x, margin = 120) {
+  return x >= camera.x - margin && x <= camera.x + WORLD.viewWidth + margin;
+}
+
 function drawProjectiles() {
   if (!state) return;
   for (const projectile of state.projectiles) {
+    if (!isVisibleWorldX(projectile.x, 100)) continue;
     ctx.save();
     ctx.strokeStyle = projectile.color;
     ctx.lineWidth = Math.max(2, projectile.size * 0.8);
@@ -7522,6 +7567,7 @@ function drawEffects() {
   if (!state) return;
 
   for (const ring of state.commandBursts) {
+    if (!isVisibleWorldX(ring.x, 150)) continue;
     const progress = 1 - ring.life / ring.maxLife;
     ctx.save();
     ctx.globalAlpha = Math.max(0, 1 - progress) * 0.75;
@@ -7534,6 +7580,7 @@ function drawEffects() {
   }
 
   for (const burst of state.hitBursts) {
+    if (!isVisibleWorldX(burst.x, 100)) continue;
     const progress = 1 - burst.life / burst.maxLife;
     const alpha = Math.max(0, 1 - progress);
     const length = (burst.heavy ? 34 : 21) * (0.45 + progress * 0.9);
@@ -7562,6 +7609,7 @@ function drawEffects() {
   }
 
   for (const particle of state.particles) {
+    if (!isVisibleWorldX(particle.x, 80)) continue;
     ctx.save();
     const alpha = clamp(particle.life / particle.maxLife, 0, 1);
     ctx.globalAlpha = alpha;
@@ -7573,6 +7621,7 @@ function drawEffects() {
   }
 
   for (const floater of state.floaters) {
+    if (!isVisibleWorldX(floater.x, 100)) continue;
     const alpha = clamp(floater.life / floater.maxLife, 0, 1);
     ctx.save();
     ctx.globalAlpha = alpha;
@@ -7674,8 +7723,9 @@ function drawBattleScene(time) {
     state.enemy.base,
     ...state.player.buildings,
     ...state.enemy.buildings,
-  ];
-  const units = [...state.player.units, ...state.enemy.units];
+  ].filter((structure) => isVisibleWorldX(structure.x, structure.width * 0.7 + 80));
+  const units = [...state.player.units, ...state.enemy.units]
+    .filter((unit) => isVisibleWorldX(unit.x, unit.def.flying ? 190 : 130));
   const renderables = [...structures, ...units].sort((a, b) => {
     if (a.y !== b.y) return a.y - b.y;
     return a.x - b.x;
@@ -7765,8 +7815,9 @@ function frame(now) {
   if (frameFailure) return;
 
   const elapsedMs = now - lastFrameTime;
-  if (elapsedMs < TARGET_FRAME_MS) return;
+  if (elapsedMs < targetFrameMs) return;
   lastFrameTime = now;
+  const frameStart = performance.now();
 
   try {
     const rawDt = Math.min(0.05, elapsedMs / 1000);
@@ -7798,6 +7849,23 @@ function frame(now) {
     }
 
     drawBattleScene(now / 1000);
+
+    const frameCost = performance.now() - frameStart;
+    if (frameCost > 24) {
+      slowFrameScore = Math.min(90, slowFrameScore + 2);
+      fastFrameScore = 0;
+    } else if (frameCost < 13) {
+      slowFrameScore = Math.max(0, slowFrameScore - 1);
+      fastFrameScore = Math.min(240, fastFrameScore + 1);
+    } else {
+      slowFrameScore = Math.max(0, slowFrameScore - 1);
+      fastFrameScore = 0;
+    }
+    if (slowFrameScore >= 36) targetFrameMs = FRAME_30_MS;
+    if (targetFrameMs === FRAME_30_MS && fastFrameScore >= 180) {
+      targetFrameMs = FRAME_60_MS;
+      fastFrameScore = 0;
+    }
   } catch (error) {
     frameFailure = true;
     paused = true;
