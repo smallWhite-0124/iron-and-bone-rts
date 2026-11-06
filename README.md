@@ -1,5 +1,10 @@
 # 铁与骨：2.5D 横版 RTS 原型
 
+## 在线试玩
+
+- 游戏地址：<https://smallwhite-0124.github.io/iron-and-bone-rts/>
+- 源码仓库：<https://github.com/smallWhite-0124/iron-and-bone-rts>
+
 一个无外部依赖的 Canvas 2.5D 横版 RTS 可玩原型。
 
 ## 运行
@@ -29,6 +34,7 @@ node server.js
 - 战斗、倒地、冲锋与复活系统
 - 敌方 AI 会自由选址建造、升级和手动排队生产
 - 60 FPS 渲染上限、粒子数量上限与帧循环异常保护
+- 自动存档与页面重载恢复
 
 ## 人口公式
 
