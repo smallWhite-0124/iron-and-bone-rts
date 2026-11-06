@@ -29,6 +29,7 @@ const ui = {
   pauseBtn: $('pauseBtn'),
   speedBtn: $('speedBtn'),
   newGameBtn: $('newGameBtn'),
+  soundBtn: $('soundBtn'),
   hintBar: $('hintBar'),
   buildCards: [...document.querySelectorAll('.build-card')],
   buildHint: $('buildHint'),
@@ -68,7 +69,7 @@ let gameSpeed = 1;
 let pointer = null;
 let hoverPoint = null;
 let hoverScreenPoint = null;
-const camera = { x: 0, velocity: 0 };
+const camera = { x: 0, velocity: 0, shakeX: 0, shakeY: 0, shakeTime: 0, shakePower: 0 };
 const pressedKeys = new Set();
 let toastTimer = 0;
 let hintTimer = 0;
@@ -99,6 +100,12 @@ const AUTOSAVE_INTERVAL = 1.5;
 const AUTOSAVE_MAX_AGE = 24 * 60 * 60 * 1000;
 let autosaveAccumulator = 0;
 let restoringSave = false;
+let hitStopTimer = 0;
+let hitStopCooldown = 0;
+let soundEnabled = true;
+let audioContext = null;
+let lastCombatSoundAt = 0;
+let lastFootstepSoundAt = 0;
 
 const backgroundSeeds = Array.from({ length: 180 }, (_, index) => {
   const seed = (index * 16807 + 77) % 2147483647;
@@ -143,6 +150,98 @@ function factionIdOf(side) {
 
 function factionOf(side) {
   return FACTIONS[side.faction];
+}
+
+function initAudio() {
+  if (!soundEnabled) return;
+  try {
+    const AudioCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtor) return;
+    if (!audioContext) audioContext = new AudioCtor();
+    if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+  } catch {
+    audioContext = null;
+  }
+}
+
+function audioReady() {
+  return soundEnabled && audioContext && audioContext.state === 'running';
+}
+
+function playTone(frequency, duration, volume, type = 'sine', endFrequency = frequency, delay = 0) {
+  if (!audioReady()) return;
+  const now = audioContext.currentTime + delay;
+  const oscillator = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  oscillator.type = type;
+  oscillator.frequency.setValueAtTime(Math.max(30, frequency), now);
+  oscillator.frequency.exponentialRampToValueAtTime(Math.max(30, endFrequency), now + duration);
+  gain.gain.setValueAtTime(Math.max(0.0001, volume), now);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  oscillator.connect(gain).connect(audioContext.destination);
+  oscillator.start(now);
+  oscillator.stop(now + duration + 0.02);
+}
+
+function playNoise(duration, volume, cutoff = 900, delay = 0) {
+  if (!audioReady()) return;
+  const now = audioContext.currentTime + delay;
+  const sampleCount = Math.max(1, Math.floor(audioContext.sampleRate * duration));
+  const buffer = audioContext.createBuffer(1, sampleCount, audioContext.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let index = 0; index < sampleCount; index += 1) {
+    const envelope = 1 - index / sampleCount;
+    data[index] = (Math.random() * 2 - 1) * envelope;
+  }
+  const source = audioContext.createBufferSource();
+  const filter = audioContext.createBiquadFilter();
+  const gain = audioContext.createGain();
+  source.buffer = buffer;
+  filter.type = 'lowpass';
+  filter.frequency.value = cutoff;
+  gain.gain.setValueAtTime(volume, now);
+  gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+  source.connect(filter).connect(gain).connect(audioContext.destination);
+  source.start(now);
+  source.stop(now + duration + 0.02);
+}
+
+function playCombatSound(kind, strength = 1, delay = 0) {
+  if (!audioReady()) return;
+  const now = performance.now();
+  if (!delay && now - lastCombatSoundAt < 42) return;
+  if (!delay) lastCombatSoundAt = now;
+  const power = clamp(strength, 0.35, 1.6);
+  if (kind === 'magic') {
+    playTone(520 * power, 0.13, 0.025, 'triangle', 210, delay);
+    playTone(840, 0.09, 0.012, 'sine', 430, delay);
+  } else if (kind === 'explosive') {
+    playTone(92 * power, 0.28, 0.06, 'sine', 42, delay);
+    playNoise(0.22, 0.055, 620, delay);
+  } else if (kind === 'ranged') {
+    playNoise(0.07, 0.035, 2200, delay);
+    playTone(170, 0.045, 0.016, 'square', 95, delay);
+  } else if (kind === 'bone') {
+    playNoise(0.09, 0.035, 1250, delay);
+    playTone(240, 0.07, 0.022, 'triangle', 130, delay);
+  } else {
+    playNoise(0.08, 0.04, 1050, delay);
+    playTone(125, 0.09, 0.03, 'triangle', 72, delay);
+  }
+}
+
+function playFootstep(strength = 0.5) {
+  if (!audioReady()) return;
+  const now = performance.now();
+  if (now - lastFootstepSoundAt < 95) return;
+  lastFootstepSoundAt = now;
+  playNoise(0.045, 0.008 * strength, 420);
+}
+
+function toggleSound() {
+  soundEnabled = !soundEnabled;
+  if (soundEnabled) initAudio();
+  if (ui.soundBtn) ui.soundBtn.textContent = soundEnabled ? '音效 开' : '音效 关';
 }
 
 function showFatal(error) {
@@ -401,6 +500,7 @@ function restoreGameState(snapshot) {
   state.particles = [];
   state.floaters = [];
   state.commandBursts = [];
+  state.hitBursts = [];
   selectedUnits = [];
   selectedBuilding = null;
   buildMode = null;
@@ -452,6 +552,7 @@ function startGame(factionId = selectedFaction, options = {}) {
     particles: [],
     floaters: [],
     commandBursts: [],
+    hitBursts: [],
     deathMarks: [],
     noticeFlags: new Set(),
   };
@@ -465,6 +566,12 @@ function startGame(factionId = selectedFaction, options = {}) {
   hoverScreenPoint = null;
   camera.x = 0;
   camera.velocity = 0;
+  camera.shakeX = 0;
+  camera.shakeY = 0;
+  camera.shakeTime = 0;
+  camera.shakePower = 0;
+  hitStopTimer = 0;
+  hitStopCooldown = 0;
   pressedKeys.clear();
   paused = false;
   gameSpeed = 1;
@@ -802,6 +909,9 @@ ui.restartBtn.addEventListener('click', () => startGame(selectedFaction));
 ui.pauseBtn.addEventListener('click', togglePause);
 ui.speedBtn.addEventListener('click', cycleSpeed);
 ui.newGameBtn.addEventListener('click', startFreshGame);
+if (ui.soundBtn) ui.soundBtn.addEventListener('click', toggleSound);
+window.addEventListener('pointerdown', initAudio, { passive: true });
+window.addEventListener('keydown', initAudio, { passive: true });
 
 ui.buildCards.forEach((card) => {
   card.addEventListener('click', () => setBuildMode(card.dataset.building));
@@ -1104,7 +1214,14 @@ function spawnUnit(side, unitId, options = {}) {
     pendingAttack: null,
     moveBlend: 0,
     walkPhase: rand(0, Math.PI * 2),
+    moveDirX: side.id === 'player' ? 1 : -1,
     stepDustTimer: rand(0.05, 0.25),
+    stepImpact: 0,
+    knockbackX: 0,
+    knockbackY: 0,
+    hitStun: 0,
+    hitStunMax: 0.12,
+    hitDir: side.id === 'player' ? 1 : -1,
     summonCooldown: def.summon ? rand(1.2, 2.5) : 0,
     healCooldown: def.heal ? rand(0.8, 1.8) : 0,
     flashCooldown: def.flashbang ? rand(1.5, 3) : 0,
@@ -1380,6 +1497,8 @@ function updateUnits(side, dt) {
     unit.knockdownImmune = Math.max(0, unit.knockdownImmune - dt);
     unit.hitFlash = Math.max(0, unit.hitFlash - dt);
     unit.attackTimer = Math.max(0, unit.attackTimer - dt);
+    unit.hitStun = Math.max(0, unit.hitStun - dt);
+    unit.stepImpact = Math.max(0, unit.stepImpact - dt * 8);
     unit.moveBlend = Math.max(0, unit.moveBlend - dt * 8);
     unit.stepDustTimer -= dt;
     unit.commandFlash = Math.max(0, unit.commandFlash - dt);
@@ -1391,6 +1510,24 @@ function updateUnits(side, dt) {
     unit.healCooldown = Math.max(0, unit.healCooldown - dt);
     unit.flashCooldown = Math.max(0, unit.flashCooldown - dt);
     unit.sweepCooldown = Math.max(0, unit.sweepCooldown - dt);
+
+    if (Math.abs(unit.knockbackX) > 0.5 || Math.abs(unit.knockbackY) > 0.5) {
+      unit.x = clamp(unit.x + unit.knockbackX * dt, 24, WORLD.width - 24);
+      unit.y = clampBattlefieldY(unit.y + unit.knockbackY * dt);
+      const damping = Math.exp(-dt * 10);
+      unit.knockbackX *= damping;
+      unit.knockbackY *= damping;
+      resolveUnitBuildingCollision(unit);
+    } else {
+      unit.knockbackX = 0;
+      unit.knockbackY = 0;
+    }
+
+    if (unit.hitStun > 0) {
+      unit.target = null;
+      unit.detour = null;
+      continue;
+    }
 
     if (unit.downTimer > 0 || unit.command === 'retreat') {
       unit.pendingAttack = null;
@@ -1546,11 +1683,25 @@ function moveUnit(unit, dx, dy, dt, canCharge) {
   unit.y = clampBattlefieldY(unit.y + dirY * step);
   resolveUnitBuildingCollision(unit);
   unit.moveBlend = Math.min(1, unit.moveBlend + dt * 12);
+  unit.moveDirX = dirX;
+  const previousPhase = unit.walkPhase;
   unit.walkPhase += dt * (4.5 + unit.def.speed * 0.055) * (0.72 + Math.abs(dirX) * 0.28);
 
-  if (!unit.def.flying && unit.stepDustTimer <= 0) {
-    addParticles(unit.x - dirX * 10, unit.y - 2, '#b59a6a', 2, { speed: 18, size: 2, life: 0.28, gravity: -8 });
-    unit.stepDustTimer = unit.def.drawType.includes('Horse') || unit.defId === 'boneDog' ? 0.12 : 0.22;
+  if (!unit.def.flying) {
+    const previousFootfall = Math.floor((previousPhase + Math.PI * 0.5) / Math.PI);
+    const currentFootfall = Math.floor((unit.walkPhase + Math.PI * 0.5) / Math.PI);
+    if (previousFootfall !== currentFootfall) {
+      const heavyStep = unit.def.drawType.includes('Horse') || unit.def.mass >= 5;
+      unit.stepImpact = heavyStep ? 0.17 : 0.11;
+      addParticles(
+        unit.x - dirX * 5 + rand(-5, 5),
+        unit.y - 1,
+        heavyStep ? '#c5a16c' : '#bda275',
+        heavyStep ? 4 : 2,
+        { speed: heavyStep ? 30 : 20, size: heavyStep ? 2.8 : 2.1, life: 0.24, gravity: -9 }
+      );
+      if (unit.side === 'player') playFootstep(heavyStep ? 1 : 0.55);
+    }
   }
 
   if (canCharge && unit.def.charge && unit.chargeCooldown <= 0) {
@@ -1659,6 +1810,16 @@ function triggerFlashbang(unit, target) {
     impact: flash.impact,
     knockdownDuration: flash.knockdown,
   });
+  addParticles(unit.x + (unit.side === 'player' ? 34 : -34), unit.y - 52, '#fff2a8', 8, {
+    speed: 75,
+    size: 3.2,
+    life: 0.2,
+    gravity: -20,
+    vx: unit.side === 'player' ? 90 : -90,
+    vy: -35,
+  });
+  addRing(unit.x, unit.y - 3, '#ffe69a', 8, 0.28);
+  playCombatSound('explosive', 0.9);
   addFloater('震爆弹', unit.x, unit.y - 84, '#ffe7a0', 14);
 }
 
@@ -1669,7 +1830,10 @@ function performTailSweep(unit, side) {
   for (const target of [...enemy.units]) {
     if (!targetAlive(target) || target.def.flying) continue;
     if (Math.abs(target.x - unit.x) > sweep.range || Math.abs(target.y - unit.y) > sweep.depth) continue;
-    const survived = dealDamage(unit, target, sweep.damage, 'melee');
+    const survived = dealDamage(unit, target, sweep.damage, 'melee', {
+      heavy: true,
+      direction: Math.sign(target.x - unit.x) || 1,
+    });
     if (survived) tryKnockdown(target, sweep.impact, sweep.knockdown);
   }
   unit.attackTimer = 0.45;
@@ -1730,16 +1894,39 @@ function resolveAttack(unit, attack) {
   const def = unit.def;
 
   if (attack.damageType !== 'melee') {
+    const facing = unit.side === 'player' ? 1 : -1;
+    const muzzleDistance = def.drawType === 'tank' ? 88 : def.drawType === 'helicopter' ? 72 : def.flying ? 62 : 48;
+    const muzzleX = unit.x + facing * muzzleDistance;
+    const muzzleY = unit.y - (def.flying ? 178 : 48);
+    const muzzleColor = def.projectileColor || '#f4d787';
+    const explosiveShot = attack.damageType === 'explosive';
+    addParticles(muzzleX, muzzleY, muzzleColor, explosiveShot ? 10 : 3, {
+      speed: explosiveShot ? 115 : 48,
+      size: explosiveShot ? 4.5 : 2.3,
+      life: explosiveShot ? 0.2 : 0.1,
+      gravity: -12,
+      vx: facing * (explosiveShot ? 125 : 72),
+      vy: -18,
+    });
+    if (explosiveShot) {
+      addRing(muzzleX, muzzleY + 8, muzzleColor, 6, 0.24);
+      camera.shakePower = Math.max(camera.shakePower, 3.4);
+      camera.shakeTime = Math.max(camera.shakeTime, 0.09);
+    }
+    playCombatSound(
+      attack.damageType === 'magic' ? 'magic' : explosiveShot ? 'explosive' : 'ranged',
+      explosiveShot ? 1.15 : 0.55
+    );
     spawnProjectile({
       side: unit.side,
       source: unit,
       target,
-      x: unit.x,
-      y: unit.y - (def.flying ? 180 : 52),
+      x: muzzleX,
+      y: muzzleY,
       damage: attack.damage,
       damageType: attack.damageType,
       speed: def.projectileSpeed || 430,
-      color: def.projectileColor || '#f4d787',
+      color: muzzleColor,
       size: def.drawType === 'boneDragon' ? 8 : def.damageType === 'magic' ? 6 : 3,
       aoeRadius: def.aoeRadius || 0,
       impact: def.projectileImpact || 0,
@@ -1748,10 +1935,9 @@ function resolveAttack(unit, attack) {
     return;
   }
 
-  const survived = dealDamage(unit, target, attack.damage, attack.damageType);
-  addParticles(target.x, target.y - (target.isBuilding ? target.height * 0.35 : target.def?.flying ? 185 : 30), def.faction === 'skeleton' ? '#c6b5e8' : '#ffd98d', 8, {
-    speed: 110,
-    size: 2.5,
+  const survived = dealDamage(unit, target, attack.damage, attack.damageType, {
+    heavy: Boolean(attack.impact) || attack.damage >= 35,
+    direction: Math.sign(target.x - unit.x) || 1,
   });
 
   if (survived && attack.impact && attack.knockdownDuration > 0) {
@@ -1783,6 +1969,102 @@ function tryKnockdown(target, impact, duration) {
   return true;
 }
 
+function addImpactBurst(x, y, color, heavy = false, direction = 1) {
+  if (!state) return;
+  state.hitBursts.push({
+    id: uid('impact'),
+    x,
+    y,
+    color,
+    heavy,
+    direction,
+    angle: rand(-0.35, 0.35),
+    life: heavy ? 0.26 : 0.16,
+    maxLife: heavy ? 0.26 : 0.16,
+  });
+  if (state.hitBursts.length > 70) state.hitBursts.splice(0, state.hitBursts.length - 70);
+}
+
+function triggerHitFeedback(source, target, finalDamage, damageType, options) {
+  if (!state) return;
+  const sourceX = Number.isFinite(source?.x) ? source.x : target.x - 1;
+  const direction = Number.isFinite(options.direction)
+    ? Math.sign(options.direction) || 1
+    : Math.sign(target.x - sourceX) || 1;
+  const heavy = Boolean(options.heavy) || damageType === 'explosive' || finalDamage >= 38;
+  const color = damageType === 'magic'
+    ? '#a7ffe3'
+    : damageType === 'explosive'
+      ? '#ffb05f'
+      : '#fff4c9';
+  const impactY = target.y - (target.isBuilding
+    ? Math.min(target.height * 0.5, 42)
+    : target.def?.flying
+      ? 164
+      : 31);
+  const onScreen = Math.abs(target.x - camera.x - WORLD.viewWidth * 0.5) < WORLD.viewWidth * 0.62;
+
+  if (target.kind === 'unit') {
+    const mass = Math.max(1, target.def.mass || 2);
+    const massFactor = clamp(3.7 / (mass + 1.25), 0.24, 1.45);
+    const basePush = damageType === 'explosive' ? 112 : damageType === 'magic' ? 48 : 56;
+    const push = (basePush + Math.min(52, finalDamage * 0.9)) * massFactor;
+    target.knockbackX += direction * push;
+    target.knockbackY += rand(-0.16, 0.16) * push;
+    target.hitDir = direction;
+    const stun = clamp((damageType === 'explosive' ? 0.2 : 0.105) * massFactor, 0.045, 0.22);
+    target.hitStunMax = Math.max(0.05, stun);
+    target.hitStun = Math.max(target.hitStun, stun);
+    target.pendingAttack = null;
+  }
+
+  addImpactBurst(
+    target.x - direction * (target.kind === 'unit' ? 10 : 18),
+    impactY,
+    color,
+    heavy,
+    direction,
+  );
+  addParticles(target.x - direction * 7, impactY, color, heavy ? 20 : 9, {
+    speed: heavy ? 145 : 92,
+    size: heavy ? 3.2 : 2.3,
+    life: heavy ? 0.42 : 0.28,
+    gravity: 260,
+    vx: direction * (heavy ? 100 : 58),
+    vy: -45,
+  });
+  if (heavy) {
+    addParticles(target.x, target.y - 4, '#c7ad7d', 7, {
+      speed: 90,
+      size: 3.8,
+      life: 0.34,
+      gravity: -18,
+      vx: direction * 48,
+      vy: -28,
+    });
+    addRing(target.x, target.y - 3, color, 8, 0.36);
+  }
+
+  if (onScreen) {
+    camera.shakePower = Math.max(camera.shakePower, heavy ? 8 : 3.2);
+    camera.shakeTime = Math.max(camera.shakeTime, heavy ? 0.2 : 0.1);
+    if (hitStopCooldown <= 0) {
+      hitStopTimer = Math.max(hitStopTimer, heavy ? 0.085 : 0.042);
+      hitStopCooldown = heavy ? 0.14 : 0.09;
+    }
+    const soundKind = damageType === 'magic'
+      ? 'magic'
+      : damageType === 'explosive'
+        ? 'explosive'
+        : damageType === 'ranged'
+          ? 'ranged'
+          : source?.faction === 'skeleton'
+            ? 'bone'
+            : 'melee';
+    playCombatSound(soundKind, heavy ? 1.4 : 0.85);
+  }
+}
+
 function dealDamage(source, target, amount, damageType, options = {}) {
 
   if (!targetAlive(target)) return false;
@@ -1798,7 +2080,8 @@ function dealDamage(source, target, amount, damageType, options = {}) {
 
   const finalDamage = Math.max(1, amount * (1 - resist));
   target.hp -= finalDamage;
-  target.hitFlash = 0.13;
+  target.hitFlash = 0.15;
+  triggerHitFeedback(source, target, finalDamage, damageType, options);
 
   const color = damageType === 'magic'
     ? '#9bf5d7'
@@ -1966,7 +2249,10 @@ function impactProjectile(projectile) {
     for (const unit of candidates) {
       if (!canTarget({ def: { damageType: 'explosive' } }, unit)) continue;
       if (Math.hypot(unit.x - target.x, unit.y - target.y) <= projectile.aoeRadius) {
-        const survived = dealDamage(projectile.source, unit, projectile.damage, projectile.damageType);
+        const survived = dealDamage(projectile.source, unit, projectile.damage, projectile.damageType, {
+          heavy: Boolean(projectile.impact) || Boolean(projectile.aoeRadius),
+          direction: Math.sign(unit.x - target.x) || Math.sign(target.x - projectile.source?.x) || 1,
+        });
         if (survived && projectile.impact && projectile.knockdownDuration > 0) {
           tryKnockdown(unit, projectile.impact, projectile.knockdownDuration);
         }
@@ -1980,7 +2266,10 @@ function impactProjectile(projectile) {
     return;
   }
 
-  const survived = dealDamage(projectile.source, target, projectile.damage, projectile.damageType);
+  const survived = dealDamage(projectile.source, target, projectile.damage, projectile.damageType, {
+    heavy: Boolean(projectile.impact) || Boolean(projectile.aoeRadius),
+    direction: Math.sign(target.x - (projectile.source?.x ?? target.x - 1)) || 1,
+  });
   if (survived && target.kind === 'unit' && projectile.impact && projectile.knockdownDuration > 0) {
     tryKnockdown(target, projectile.impact, projectile.knockdownDuration);
   }
@@ -2289,8 +2578,8 @@ function addParticles(x, y, color, count = 6, options = {}) {
     state.particles.push({
       x: x + rand(-7, 7),
       y: y + rand(-7, 7),
-      vx: rand(-1, 1) * (options.speed ?? 55),
-      vy: rand(-1, 0.2) * (options.speed ?? 55),
+      vx: (options.vx ?? 0) + rand(-1, 1) * (options.speed ?? 55),
+      vy: (options.vy ?? 0) + rand(-1, 0.2) * (options.speed ?? 55),
       size: options.size ?? rand(1.5, 4),
       color,
       life,
@@ -2335,6 +2624,11 @@ function updateEffects(dt) {
     ring.life -= dt;
   }
   state.commandBursts = state.commandBursts.filter((ring) => ring.life > 0);
+
+  for (const burst of state.hitBursts) {
+    burst.life -= dt;
+  }
+  state.hitBursts = state.hitBursts.filter((burst) => burst.life > 0);
 }
 
 function updateHud(force = false) {
@@ -3769,9 +4063,10 @@ function drawUnit(unit, time) {
   const def = unit.def;
   const selected = selectedUnits.includes(unit);
   const facing = unit.side === 'player' ? 1 : -1;
-  const stepBob = Math.abs(Math.sin(unit.walkPhase)) * 2.4 * unit.moveBlend;
+  const stepBob = (Math.abs(Math.sin(unit.walkPhase)) * 2.3 + (unit.stepImpact || 0) * 3.2) * unit.moveBlend;
   const bob = def.flying ? Math.sin(time * 2.6 + unit.bobSeed) * 4 : idleBreath(unit, time) + stepBob;
   const down = unit.downTimer > 0;
+  const hitRecoil = down ? 0 : clamp(unit.hitStun / (unit.hitStunMax || 0.12), 0, 1);
 
   if (selected) {
     ctx.save();
@@ -3796,27 +4091,40 @@ function drawUnit(unit, time) {
   ctx.save();
   ctx.fillStyle = def.flying ? 'rgba(36, 26, 19, 0.2)' : 'rgba(36, 26, 19, 0.28)';
   ctx.beginPath();
-  ctx.ellipse(unit.x, unit.y + 1, def.flying ? 31 : def.radius * (0.9 + unit.moveBlend * 0.16), def.flying ? 7 : 5, 0, 0, Math.PI * 2);
+  const shadowStretch = 0.9 + unit.moveBlend * 0.16 + (unit.stepImpact || 0) * 0.7;
+  ctx.ellipse(unit.x, unit.y + 1, def.flying ? 31 : def.radius * shadowStretch, def.flying ? 7 : 4.6, 0, 0, Math.PI * 2);
   ctx.fill();
+  if (!def.flying && unit.stepImpact > 0) {
+    ctx.globalAlpha = unit.stepImpact * 2.2;
+    ctx.strokeStyle = '#8c7653';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.ellipse(unit.x, unit.y + 1, def.radius * (1.05 + (1 - unit.stepImpact / 0.17) * 0.3), 5.5, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
   ctx.restore();
 
   ctx.save();
   const lunge = unit.def.damageType === 'melee' ? attackPulse(unit) * 5 : 0;
   const visualY = unit.y - (def.flying ? 150 : 0);
   ctx.translate(unit.x + facing * lunge, visualY + bob);
-  ctx.shadowColor = '#241a13';
+  ctx.shadowColor = 'transparent';
   ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 2;
-  ctx.shadowOffsetY = 3;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   if (down) {
     ctx.translate(0, -2);
     ctx.rotate(unit.side === 'player' ? -1.16 : 1.16);
     ctx.translate(-6, -4);
+  } else if (hitRecoil > 0) {
+    const localDirection = unit.hitDir * facing;
+    ctx.rotate(localDirection * hitRecoil * 0.13);
+    ctx.translate(-localDirection * hitRecoil * 2.2, -hitRecoil * 1.4);
   }
   const depthScale = 0.88 + clamp((unit.y - WORLD.battlefieldFarY) / (WORLD.battlefieldNearY - WORLD.battlefieldFarY), 0, 1) * 0.26;
-  ctx.scale(facing * depthScale, depthScale);
+  ctx.scale(facing * depthScale * (1 - hitRecoil * 0.035), depthScale * (1 + hitRecoil * 0.025));
   if (unit.revived) ctx.globalAlpha = 0.92;
 
   switch (def.drawType) {
@@ -3889,6 +4197,18 @@ function drawUnit(unit, time) {
     default:
       break;
   }
+
+  if (unit.hitFlash > 0) {
+    const flash = clamp(unit.hitFlash / 0.15, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = flash * 0.5;
+    ctx.globalCompositeOperation = 'screen';
+    ctx.fillStyle = '#fff3cf';
+    ctx.beginPath();
+    ctx.ellipse(0, -34, Math.max(12, def.radius * 1.3), Math.max(23, def.radius * 2.1), 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
   ctx.restore();
 
   drawUnitOverlay(unit, selected, down);
@@ -3937,98 +4257,240 @@ function drawUnitOverlay(unit, selected, down) {
 function drawHumanoidBase(colors, unit, scale = 1) {
   ctx.save();
   ctx.scale(scale, scale);
+
   const phase = unit.walkPhase;
   const move = unit.moveBlend;
-  const stride = Math.sin(phase) * 4.5 * move;
-  const armSwing = Math.sin(phase + Math.PI) * 4 * move;
-  const stepLift = Math.abs(Math.sin(phase)) * 1.3 * move;
-  const ink = '#241a13';
-  ctx.translate(0, -stepLift);
-
-  ctx.strokeStyle = ink;
-  ctx.lineWidth = 6;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(-5, -20);
-  ctx.lineTo(-9 + stride, -2);
-  ctx.moveTo(5, -20);
-  ctx.lineTo(9 - stride, -2);
-  ctx.stroke();
-
+  const ink = '#21170f';
   const teamColor = FACTIONS[unit.faction]?.color || colors.armor;
-  ctx.fillStyle = colors.armor;
+  const worldFacing = unit.side === 'player' ? 1 : -1;
+  const lean = clamp((unit.moveDirX ?? 1) * worldFacing, -1, 1) * 0.045 * move;
+  const swingPose = attackSwingCurve(unit);
+  const strikePose = attackPulse(unit);
+  const stanceDrop = Math.abs(Math.sin(phase)) * 0.75 * move + strikePose * 0.85;
+  ctx.translate(0, stanceDrop);
+  ctx.rotate(lean + clamp(swingPose, -0.9, 1.15) * 0.035);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  function drawLeg(offset, rear) {
+    const swing = Math.sin(phase + offset) * 8.5 * move;
+    const lift = Math.max(0, Math.cos(phase + offset)) * 3.2 * move;
+    const hipX = rear ? -3.2 : 3.2;
+    const attackBrace = strikePose * (rear ? -2.4 : 3.8);
+    const footX = hipX + swing + attackBrace;
+    const footY = -2 - lift;
+    const kneeX = (hipX + footX) * 0.5 + (rear ? 0.8 : 3.2) * move;
+    const kneeY = (hipX * 0 + -23 + footY) * 0.5 - 0.6 * move;
+
+    ctx.globalAlpha = rear ? 0.78 : 1;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.moveTo(hipX, -23);
+    ctx.quadraticCurveTo(kneeX + 1, kneeY, footX, footY);
+    ctx.lineTo(footX + 4.5, footY);
+    ctx.stroke();
+
+    ctx.strokeStyle = colors.legs || '#303947';
+    ctx.lineWidth = 3.8;
+    ctx.beginPath();
+    ctx.moveTo(hipX, -23);
+    ctx.quadraticCurveTo(kneeX + 1, kneeY, footX, footY);
+    ctx.lineTo(footX + 3.5, footY);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255, 244, 210, 0.26)';
+    ctx.lineWidth = 1.15;
+    ctx.beginPath();
+    ctx.moveTo(hipX + 1.2, -22);
+    ctx.quadraticCurveTo(kneeX + 1.5, kneeY - 1, footX + 1, footY - 0.5);
+    ctx.stroke();
+
+    ctx.fillStyle = ink;
+    ctx.beginPath();
+    ctx.ellipse(footX + 2, footY + 0.2, 4.8, 2.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawArm(offset, rear) {
+    const armSwing = Math.sin(phase + offset) * (rear ? 5.5 : 3.2) * move;
+    const shoulderX = rear ? -9.5 : 9.5;
+    const actionReach = strikePose * (rear ? -2.2 : 6.2);
+    const elbowX = shoulderX + (rear ? -2 : 2.5) + armSwing * 0.45 + actionReach * 0.55;
+    const handX = shoulderX + (rear ? -6.5 : 7.5) + armSwing + actionReach;
+    const elbowY = -35 + Math.abs(armSwing) * 0.08;
+    const handY = -29 + Math.sin(phase + offset + 0.5) * 1.8 * move;
+
+    ctx.globalAlpha = rear ? 0.72 : 1;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 6.2;
+    ctx.beginPath();
+    ctx.moveTo(shoulderX, -44);
+    ctx.lineTo(elbowX, elbowY);
+    ctx.lineTo(handX, handY);
+    ctx.stroke();
+
+    ctx.strokeStyle = colors.body || colors.armor;
+    ctx.lineWidth = 3.2;
+    ctx.beginPath();
+    ctx.moveTo(shoulderX, -44);
+    ctx.lineTo(elbowX, elbowY);
+    ctx.lineTo(handX, handY);
+    ctx.stroke();
+
+    ctx.fillStyle = colors.skin;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    ctx.arc(handX, handY, 2.8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  drawArm(Math.PI, true);
+  drawLeg(Math.PI, true);
+
+  const clothWave = Math.sin(phase + 0.8) * 2.2 * move;
+  ctx.fillStyle = teamColor;
   ctx.strokeStyle = ink;
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(-13, -47);
-  ctx.lineTo(-9, -53);
-  ctx.lineTo(9, -53);
-  ctx.lineTo(14, -44);
-  ctx.lineTo(10, -26);
-  ctx.lineTo(-10, -26);
+  ctx.moveTo(-8, -49);
+  ctx.quadraticCurveTo(-17 - clothWave, -43, -13 - clothWave * 1.4, -32);
+  ctx.lineTo(-6, -37);
+  ctx.lineTo(-4, -47);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
 
-  ctx.fillStyle = teamColor;
-  ctx.fillRect(-8, -29, 16, 3);
-  ctx.fillStyle = 'rgba(255,255,255,0.28)';
+  ctx.fillStyle = colors.body || colors.armor;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 2.7;
   ctx.beginPath();
-  ctx.moveTo(-10, -49);
-  ctx.lineTo(10, -49);
-  ctx.lineTo(12, -44);
-  ctx.lineTo(-12, -44);
+  ctx.moveTo(-12, -50);
+  ctx.quadraticCurveTo(-16, -43, -11, -27);
+  ctx.lineTo(-5, -24);
+  ctx.lineTo(6, -24);
+  ctx.lineTo(12, -28);
+  ctx.quadraticCurveTo(15, -43, 11, -50);
+  ctx.lineTo(5, -54);
+  ctx.lineTo(-6, -54);
   ctx.closePath();
   ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = colors.armor;
+  ctx.beginPath();
+  ctx.moveTo(-9, -49);
+  ctx.lineTo(3, -52);
+  ctx.lineTo(12, -46);
+  ctx.lineTo(9, -31);
+  ctx.lineTo(1, -27);
+  ctx.lineTo(-8, -31);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  ctx.beginPath();
+  ctx.moveTo(-8, -47);
+  ctx.lineTo(2, -49);
+  ctx.lineTo(7, -45);
+  ctx.lineTo(-1, -42);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.strokeStyle = teamColor;
+  ctx.lineWidth = 3.2;
+  ctx.beginPath();
+  ctx.moveTo(-9, -46);
+  ctx.lineTo(7, -32);
+  ctx.stroke();
+
+  ctx.fillStyle = '#3a2a20';
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1.4;
+  fillRoundRect(-9.5, -29.5, 19, 4.2, 1.5, '#3a2a20');
+  ctx.strokeRect(-9.5, -29.5, 19, 4.2);
+  ctx.fillStyle = '#d9b45f';
+  ctx.fillRect(-2, -29.5, 4, 4.2);
+
   ctx.fillStyle = colors.armor;
   ctx.strokeStyle = ink;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.arc(-12, -44, 5, 0, Math.PI * 2);
-  ctx.arc(12, -44, 5, 0, Math.PI * 2);
+  ctx.arc(-10.5, -45, 5.2, 0, Math.PI * 2);
+  ctx.arc(10.5, -45, 5.2, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-
-  ctx.strokeStyle = ink;
-  ctx.lineWidth = 5;
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
   ctx.beginPath();
-  ctx.moveTo(-10, -43);
-  ctx.lineTo(-18 + armSwing * 0.35, -31 + stride * 0.3);
-  ctx.moveTo(10, -43);
-  ctx.lineTo(18 - armSwing * 0.35, -32 - stride * 0.3);
-  ctx.stroke();
+  ctx.arc(-11.5, -46.5, 2.3, Math.PI, Math.PI * 2);
+  ctx.arc(9.5, -46.5, 2.3, Math.PI, Math.PI * 2);
+  ctx.fill();
+
+  drawLeg(0, false);
+  drawArm(0, false);
 
   ctx.fillStyle = colors.skin;
   ctx.strokeStyle = ink;
   ctx.lineWidth = 2.5;
   ctx.beginPath();
-  ctx.arc(0, -61, 9, 0, Math.PI * 2);
+  ctx.ellipse(0.5, -61, 8.7, 9.2, -0.03, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.beginPath();
+  ctx.ellipse(3.7, -62, 3.5, 4.8, -0.25, 0, Math.PI * 2);
+  ctx.fill();
 
   ctx.fillStyle = colors.helmet;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 2.3;
   ctx.beginPath();
-  ctx.arc(0, -63, 10, Math.PI, Math.PI * 2);
-  ctx.lineTo(10, -59);
-  ctx.lineTo(-10, -59);
+  ctx.moveTo(-9.5, -63);
+  ctx.quadraticCurveTo(-8, -73, 0, -73);
+  ctx.quadraticCurveTo(9, -72, 10.5, -62);
+  ctx.lineTo(8, -58);
+  ctx.lineTo(-8, -58);
   ctx.closePath();
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = teamColor;
+  ctx.fillStyle = colors.visor || '#18212a';
+  ctx.fillRect(-8, -65.5, 16, 3.4);
+  ctx.fillStyle = '#e8ddb8';
+  ctx.fillRect(2.5, -65, 4.5, 2.1);
+  ctx.fillStyle = ink;
   ctx.beginPath();
-  ctx.moveTo(-2, -72);
-  ctx.quadraticCurveTo(-10, -82, 3, -79);
-  ctx.quadraticCurveTo(8, -77, 4, -71);
-  ctx.closePath();
+  ctx.arc(4.5, -63.9, 1.15, 0, Math.PI * 2);
   ctx.fill();
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.moveTo(8, -61.5);
+  ctx.lineTo(3, -60.2);
   ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,0.45)';
-  ctx.fillRect(2, -63, 6, 2);
 
-  ctx.fillStyle = '#241a13';
+  ctx.fillStyle = teamColor;
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1.8;
   ctx.beginPath();
-  ctx.arc(3, -61, 1.7, 0, Math.PI * 2);
+  ctx.moveTo(-3, -71);
+  ctx.quadraticCurveTo(-12 - clothWave * 0.4, -80, 1, -81);
+  ctx.quadraticCurveTo(7, -80, 4, -70);
+  ctx.closePath();
   ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.32)';
+  ctx.beginPath();
+  ctx.moveTo(-4, -70);
+  ctx.lineTo(1, -76);
+  ctx.lineTo(4, -70);
+  ctx.closePath();
+  ctx.fill();
+
   ctx.restore();
 }
 function drawSwordKnight(unit, time) {
@@ -4133,19 +4595,42 @@ function drawCavalry(unit, time, heavy) {
   ctx.save();
   ctx.translate(0, -gallopBob);
 
-  ctx.strokeStyle = ink;
-  ctx.lineWidth = heavy ? 7 : 6;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(-16, -17);
-  ctx.lineTo(-23 + strideA, 0);
-  ctx.moveTo(-4, -18);
-  ctx.lineTo(1 - strideB, 0);
-  ctx.moveTo(20, -18);
-  ctx.lineTo(28 + strideB, 0);
-  ctx.moveTo(30, -18);
-  ctx.lineTo(38 - strideA, 0);
-  ctx.stroke();
+  const horseLegColor = heavy ? '#4d5968' : '#6d513e';
+  function drawHorseLeg(baseX, offset, rear) {
+    const swing = Math.sin(phase + offset) * (heavy ? 7 : 9) * move;
+    const lift = Math.max(0, Math.cos(phase + offset)) * (heavy ? 2.5 : 3.5) * move;
+    const kneeX = baseX + swing * 0.45 + (rear ? -1.5 : 1.5) * move;
+    const kneeY = -9 - lift * 0.25;
+    const hoofX = baseX + swing;
+    const hoofY = -lift;
+    ctx.globalAlpha = rear ? 0.7 : 1;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = heavy ? 7 : 6;
+    ctx.beginPath();
+    ctx.moveTo(baseX, -18);
+    ctx.lineTo(kneeX, kneeY);
+    ctx.lineTo(hoofX, hoofY);
+    ctx.stroke();
+    ctx.strokeStyle = horseLegColor;
+    ctx.lineWidth = heavy ? 3.8 : 3.2;
+    ctx.beginPath();
+    ctx.moveTo(baseX, -18);
+    ctx.lineTo(kneeX, kneeY);
+    ctx.lineTo(hoofX, hoofY);
+    ctx.stroke();
+    ctx.fillStyle = '#2c2119';
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.ellipse(hoofX + 1, hoofY, 3.6, 1.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  drawHorseLeg(-15, Math.PI, true);
+  drawHorseLeg(-5, Math.PI * 0.82, true);
+  drawHorseLeg(21, Math.PI * 0.2, false);
+  drawHorseLeg(30, 0, false);
 
   ctx.fillStyle = horseColor;
   ctx.strokeStyle = ink;
@@ -4351,60 +4836,183 @@ function drawSkeletonFrame(unit, color = '#eadfc7') {
   const ink = '#241a13';
   const phase = unit.walkPhase;
   const move = unit.moveBlend;
-  const stride = Math.sin(phase) * 4.5 * move;
-  const armSwing = Math.sin(phase + Math.PI) * 3.5 * move;
-  const bob = Math.abs(Math.sin(phase)) * 1.2 * move;
-
+  const teamColor = FACTIONS[unit.faction]?.color || '#9b82bf';
   ctx.save();
-  ctx.translate(0, -bob);
-  const drawBoneLines = () => {
-    ctx.beginPath();
-    ctx.moveTo(0, -25);
-    ctx.lineTo(0, -49);
-    ctx.moveTo(-10, -42);
-    ctx.lineTo(10, -42);
-    ctx.moveTo(-8, -36);
-    ctx.lineTo(8, -36);
-    ctx.moveTo(-7, -30);
-    ctx.lineTo(7, -30);
-    ctx.moveTo(-4, -22);
-    ctx.lineTo(-9 + stride, -3);
-    ctx.moveTo(4, -22);
-    ctx.lineTo(9 - stride, -3);
-    ctx.moveTo(-9, -43);
-    ctx.lineTo(-17 + armSwing, -30);
-    ctx.moveTo(9, -43);
-    ctx.lineTo(17 - armSwing, -31);
-  };
-
   ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  function drawBoneLeg(offset, rear) {
+    const swing = Math.sin(phase + offset) * 9 * move;
+    const lift = Math.max(0, Math.cos(phase + offset)) * 3 * move;
+    const hipX = rear ? -2.7 : 2.7;
+    const footX = hipX + swing + attackPulse(unit) * (rear ? -2.2 : 3.4);
+    const footY = -2 - lift;
+    const kneeX = (hipX + footX) * 0.5 + (rear ? 0.3 : 2.8) * move;
+    const kneeY = -13 + lift * 0.12;
+    ctx.globalAlpha = rear ? 0.7 : 1;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(hipX, -22);
+    ctx.lineTo(kneeX, kneeY);
+    ctx.lineTo(footX, footY);
+    ctx.lineTo(footX + 4, footY + 0.3);
+    ctx.stroke();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.8;
+    ctx.beginPath();
+    ctx.moveTo(hipX, -22);
+    ctx.lineTo(kneeX, kneeY);
+    ctx.lineTo(footX, footY);
+    ctx.lineTo(footX + 3.5, footY + 0.3);
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(kneeX, kneeY, 2.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  function drawBoneArm(offset, rear) {
+    const swing = Math.sin(phase + offset) * (rear ? 5 : 3.2) * move;
+    const shoulderX = rear ? -8 : 8;
+    const attackReach = attackPulse(unit) * (rear ? -2 : 5.5);
+    const elbowX = shoulderX + (rear ? -2.6 : 2.2) + swing * 0.55 + attackReach * 0.55;
+    const handX = shoulderX + (rear ? -7 : 6.5) + swing + attackReach;
+    const elbowY = -35 + Math.abs(swing) * 0.08;
+    const handY = -30 + Math.sin(phase + offset) * 1.7 * move;
+    ctx.globalAlpha = rear ? 0.64 : 1;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 5.4;
+    ctx.beginPath();
+    ctx.moveTo(shoulderX, -43);
+    ctx.lineTo(elbowX, elbowY);
+    ctx.lineTo(handX, handY);
+    ctx.stroke();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2.3;
+    ctx.beginPath();
+    ctx.moveTo(shoulderX, -43);
+    ctx.lineTo(elbowX, elbowY);
+    ctx.lineTo(handX, handY);
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.strokeStyle = ink;
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.arc(elbowX, elbowY, 1.8, 0, Math.PI * 2);
+    ctx.arc(handX, handY, 2.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  drawBoneArm(Math.PI, true);
+  drawBoneLeg(Math.PI, true);
+
+  ctx.fillStyle = teamColor;
   ctx.strokeStyle = ink;
-  ctx.lineWidth = 6;
-  drawBoneLines();
+  ctx.lineWidth = 1.8;
+  const clothWave = Math.sin(phase + 0.8) * 2.2 * move;
+  ctx.beginPath();
+  ctx.moveTo(-7, -29);
+  ctx.lineTo(-14 - clothWave, -17);
+  ctx.lineTo(-5, -20);
+  ctx.lineTo(2, -29);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 6.2;
+  ctx.beginPath();
+  ctx.moveTo(0, -22);
+  ctx.lineTo(0, -49);
+  ctx.moveTo(-9, -39);
+  ctx.lineTo(9, -39);
+  ctx.moveTo(-7.5, -34);
+  ctx.lineTo(7.5, -34);
+  ctx.moveTo(-6, -29);
+  ctx.lineTo(6, -29);
   ctx.stroke();
 
   ctx.strokeStyle = color;
-  ctx.lineWidth = 3;
-  drawBoneLines();
+  ctx.lineWidth = 2.8;
+  ctx.beginPath();
+  ctx.moveTo(0, -22);
+  ctx.lineTo(0, -49);
   ctx.stroke();
+
+  ctx.lineWidth = 1.9;
+  for (let index = 0; index < 3; index += 1) {
+    const y = -39 + index * 5;
+    const width = 8.5 - index * 1.2;
+    ctx.beginPath();
+    ctx.moveTo(-width, y);
+    ctx.quadraticCurveTo(0, y + 2.2, width, y);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(-5, -48);
+  ctx.lineTo(0, -52);
+  ctx.lineTo(5, -48);
+  ctx.stroke();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2.1;
+  ctx.beginPath();
+  ctx.moveTo(-5, -48);
+  ctx.lineTo(0, -52);
+  ctx.lineTo(5, -48);
+  ctx.stroke();
+
+  drawBoneLeg(0, false);
+  drawBoneArm(0, false);
 
   ctx.fillStyle = color;
   ctx.strokeStyle = ink;
-  ctx.lineWidth = 2.5;
+  ctx.lineWidth = 2.4;
   ctx.beginPath();
-  ctx.arc(0, -58, 9, 0, Math.PI * 2);
+  ctx.ellipse(0.5, -59, 8.8, 9.2, -0.06, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-
-  ctx.fillStyle = '#241a13';
+  ctx.fillStyle = '#2a2032';
   ctx.beginPath();
-  ctx.ellipse(-3.5, -59, 2.2, 3.3, 0, 0, Math.PI * 2);
-  ctx.ellipse(3.5, -59, 2.2, 3.3, 0, 0, Math.PI * 2);
+  ctx.ellipse(-3.2, -60, 2.5, 3.4, -0.1, 0, Math.PI * 2);
+  ctx.ellipse(3.2, -60, 2.5, 3.4, 0.1, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillRect(-4, -52, 8, 2);
+  ctx.fillStyle = teamColor;
+  ctx.beginPath();
+  ctx.arc(-3.2, -60, 1.15, 0, Math.PI * 2);
+  ctx.arc(3.2, -60, 1.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#2a2032';
+  ctx.beginPath();
+  ctx.moveTo(1, -55.5);
+  ctx.lineTo(6, -53.7);
+  ctx.lineTo(1, -52);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = ink;
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(-4, -52);
+  ctx.lineTo(4, -52);
+  ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(-7, -66);
+  ctx.lineTo(-11, -72);
+  ctx.lineTo(-4, -68);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
   ctx.restore();
 }
-
 function drawBoneSoldier(unit, time) {
   drawSkeletonFrame(unit);
   const swing = attackSwingCurve(unit);
@@ -5326,6 +5934,34 @@ function drawEffects() {
     ctx.restore();
   }
 
+  for (const burst of state.hitBursts) {
+    const progress = 1 - burst.life / burst.maxLife;
+    const alpha = Math.max(0, 1 - progress);
+    const length = (burst.heavy ? 34 : 21) * (0.45 + progress * 0.9);
+    ctx.save();
+    ctx.translate(burst.x, burst.y);
+    ctx.rotate(burst.angle);
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = burst.color;
+    ctx.fillStyle = burst.color;
+    ctx.lineWidth = burst.heavy ? 4.5 : 2.8;
+    ctx.lineCap = 'round';
+    for (let index = 0; index < (burst.heavy ? 8 : 5); index += 1) {
+      const angle = (Math.PI * 2 * index) / (burst.heavy ? 8 : 5) + (index % 2) * 0.16;
+      const inner = burst.heavy ? 8 : 5;
+      const outer = length * (index % 2 ? 0.72 : 1);
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+      ctx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = alpha * 0.24;
+    ctx.beginPath();
+    ctx.arc(0, 0, (burst.heavy ? 30 : 18) * (0.4 + progress), 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   for (const particle of state.particles) {
     ctx.save();
     const alpha = clamp(particle.life / particle.maxLife, 0, 1);
@@ -5412,7 +6048,7 @@ function drawSelectionOverlay() {
 
 function drawBattleScene(time) {
   ctx.save();
-  ctx.translate(-camera.x, 0);
+  ctx.translate(-camera.x + camera.shakeX, camera.shakeY);
   drawBackground(time);
 
   if (!state) {
@@ -5485,6 +6121,22 @@ function updateAmbientTimers(dt) {
 }
 
 function updateCamera(dt) {
+  if (camera.shakeTime > 0) {
+    camera.shakeTime = Math.max(0, camera.shakeTime - dt);
+    const fade = camera.shakeTime > 0 ? Math.min(1, camera.shakeTime * 12) : 0;
+    const power = camera.shakePower * fade;
+    camera.shakeX = rand(-power, power);
+    camera.shakeY = rand(-power * 0.55, power * 0.55);
+    if (camera.shakeTime === 0) {
+      camera.shakePower = 0;
+      camera.shakeX = 0;
+      camera.shakeY = 0;
+    }
+  } else {
+    camera.shakeX = lerp(camera.shakeX, 0, 1 - Math.exp(-dt * 24));
+    camera.shakeY = lerp(camera.shakeY, 0, 1 - Math.exp(-dt * 24));
+  }
+
   if (!state || state.ended) {
     camera.velocity = lerp(camera.velocity, 0, 1 - Math.exp(-dt * 12));
     return;
@@ -5516,7 +6168,10 @@ function frame(now) {
 
   try {
     const rawDt = Math.min(0.05, elapsedMs / 1000);
-    if (state && !paused && !state.ended) {
+    hitStopCooldown = Math.max(0, hitStopCooldown - rawDt);
+    hitStopTimer = Math.max(0, hitStopTimer - rawDt);
+    const frozenByImpact = hitStopTimer > 0;
+    if (state && !paused && !state.ended && !frozenByImpact) {
       let remaining = rawDt * gameSpeed;
       while (remaining > 0.0001 && !state.ended) {
         const step = Math.min(0.025, remaining);
@@ -5571,6 +6226,8 @@ window.__RTS_DEBUG__ = {
   getPlacementError,
   spawnUnit,
   updateGame,
+  dealDamage,
+  render: () => drawBattleScene(performance.now() / 1000),
   refreshHud: () => updateHud(true),
 };
 
