@@ -55,7 +55,9 @@ button:focus-visible { outline: 3px solid #fff1be; outline-offset: 2px; }
 }
 
 #hud { position: absolute; inset: 0; pointer-events: none; }
-#hud button, .overlay button { pointer-events: auto; }
+#hud button { pointer-events: auto; }
+.overlay button { pointer-events: none; }
+.overlay.visible button { pointer-events: auto; }
 
 .status-card {
   position: absolute;
@@ -351,10 +353,16 @@ button:focus-visible { outline: 3px solid #fff1be; outline-offset: 2px; }
   padding: 28px;
   background: rgba(36, 26, 19, 0.72);
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity 220ms ease;
+  transition: opacity 220ms ease, visibility 0s linear 220ms;
 }
-.overlay.visible { opacity: 1; pointer-events: auto; }
+.overlay.visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition: opacity 220ms ease, visibility 0s;
+}
 
 .start-card,
 .end-card {
