@@ -69,7 +69,7 @@ let gameSpeed = 1;
 let pointer = null;
 let hoverPoint = null;
 let hoverScreenPoint = null;
-const camera = { x: 0, velocity: 0, shakeX: 0, shakeY: 0, shakeTime: 0, shakePower: 0 };
+const camera = { x: 0, velocity: 0, shakeX: 0, shakeY: 0, shakeTime: 0, shakePower: 0, shakePhase: 0 };
 const pressedKeys = new Set();
 let toastTimer = 0;
 let hintTimer = 0;
@@ -570,6 +570,7 @@ function startGame(factionId = selectedFaction, options = {}) {
   camera.shakeY = 0;
   camera.shakeTime = 0;
   camera.shakePower = 0;
+  camera.shakePhase = 0;
   hitStopTimer = 0;
   hitStopCooldown = 0;
   pressedKeys.clear();
@@ -1910,8 +1911,8 @@ function resolveAttack(unit, attack) {
     });
     if (explosiveShot) {
       addRing(muzzleX, muzzleY + 8, muzzleColor, 6, 0.24);
-      camera.shakePower = Math.max(camera.shakePower, 3.4);
-      camera.shakeTime = Math.max(camera.shakeTime, 0.09);
+      camera.shakePower = Math.max(camera.shakePower, 1.45);
+      camera.shakeTime = Math.max(camera.shakeTime, 0.065);
     }
     playCombatSound(
       attack.damageType === 'magic' ? 'magic' : explosiveShot ? 'explosive' : 'ranged',
@@ -2046,8 +2047,8 @@ function triggerHitFeedback(source, target, finalDamage, damageType, options) {
   }
 
   if (onScreen) {
-    camera.shakePower = Math.max(camera.shakePower, heavy ? 8 : 3.2);
-    camera.shakeTime = Math.max(camera.shakeTime, heavy ? 0.2 : 0.1);
+    camera.shakePower = Math.max(camera.shakePower, heavy ? 3.3 : 1.15);
+    camera.shakeTime = Math.max(camera.shakeTime, heavy ? 0.14 : 0.065);
     if (hitStopCooldown <= 0) {
       hitStopTimer = Math.max(hitStopTimer, heavy ? 0.085 : 0.042);
       hitStopCooldown = heavy ? 0.14 : 0.09;
@@ -4838,7 +4839,10 @@ function drawCavalry(unit, time, heavy) {
   const horseColor = heavy ? '#596779' : '#7a5d47';
   const armorColor = heavy ? '#9eaec2' : '#768ca5';
   const ink = '#241a13';
-  const thrust = attackPulse(unit) * (heavy ? 18 : 12);
+  const attackPose = attackPulse(unit);
+  const thrust = attackPose * (heavy ? 20 : 15);
+  const charging = unit.chargeDistance >= (unit.def.charge?.distance || 999);
+  const spearAngle = -0.09 + attackPose * 0.13 + (charging ? -0.035 : 0);
 
   ctx.save();
   ctx.translate(0, -gallopBob);
@@ -5032,7 +5036,7 @@ function drawCavalry(unit, time, heavy) {
 
   ctx.save();
   ctx.translate(riderHandX, riderHandY);
-  ctx.rotate(-0.48);
+  ctx.rotate(spearAngle);
   ctx.strokeStyle = ink;
   ctx.lineWidth = heavy ? 7 : 6;
   ctx.beginPath();
@@ -7278,12 +7282,14 @@ function updateAmbientTimers(dt) {
 function updateCamera(dt) {
   if (camera.shakeTime > 0) {
     camera.shakeTime = Math.max(0, camera.shakeTime - dt);
-    const fade = camera.shakeTime > 0 ? Math.min(1, camera.shakeTime * 12) : 0;
+    camera.shakePhase += dt;
+    const fade = camera.shakeTime > 0 ? Math.min(1, camera.shakeTime * 14) : 0;
     const power = camera.shakePower * fade;
-    camera.shakeX = rand(-power, power);
-    camera.shakeY = rand(-power * 0.55, power * 0.55);
+    camera.shakeX = Math.sin(camera.shakePhase * 105) * power * 0.7 + rand(-power, power) * 0.1;
+    camera.shakeY = Math.sin(camera.shakePhase * 83 + 1.3) * power * 0.3;
     if (camera.shakeTime === 0) {
       camera.shakePower = 0;
+      camera.shakePhase = 0;
       camera.shakeX = 0;
       camera.shakeY = 0;
     }
