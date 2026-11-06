@@ -485,3 +485,55 @@ button:focus-visible { outline: 3px solid #fff1be; outline-offset: 2px; }
   .center-status { top: 7px; }
   .hint-bar { display: none; }
 }
+/* Hand-painted texture pass */
+.status-card,
+.build-panel,
+.army-panel,
+.command-panel,
+.start-card,
+.end-card {
+  background-image:
+    radial-gradient(rgba(82, 55, 27, 0.055) 0.7px, transparent 0.8px),
+    linear-gradient(180deg, rgba(255, 249, 223, 0.42), rgba(204, 168, 108, 0.08));
+  background-size: 7px 7px, 100% 100%;
+}
+
+.status-card {
+  box-shadow: 4px 4px 0 rgba(30, 21, 15, 0.94), inset 0 0 0 1px rgba(255, 247, 213, 0.35);
+}
+
+.faction-name {
+  text-shadow: 1px 1px 0 rgba(255, 247, 213, 0.55);
+}
+
+.panel-title {
+  padding-bottom: 5px;
+  border-bottom: 1px dashed rgba(72, 50, 29, 0.28);
+}
+
+.build-card,
+.unit-btn,
+.command-btn {
+  background-image: linear-gradient(180deg, rgba(255, 248, 220, 0.22), rgba(104, 75, 42, 0.04));
+}
+
+.faction-choice {
+  background-image:
+    radial-gradient(rgba(82, 55, 27, 0.05) 0.7px, transparent 0.8px),
+    linear-gradient(135deg, rgba(255, 250, 226, 0.42), rgba(182, 139, 74, 0.08));
+  background-size: 7px 7px, 100% 100%;
+}
+
+.start-card h1 {
+  text-shadow: 4px 4px 0 #d6b270, 7px 7px 0 rgba(53, 37, 23, 0.18);
+}
+
+.faction-emblem {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border: 2px solid #241a13;
+  border-radius: 50%;
+  background: rgba(255, 244, 204, 0.55);
+}
