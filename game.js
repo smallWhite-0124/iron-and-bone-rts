@@ -1531,7 +1531,7 @@ function updateUnits(side, dt) {
     }
 
     if (unit.downTimer > 0 || unit.command === 'retreat') {
-      unit.pendingAttack = null;
+      interruptAttack(unit);
     }
 
     if (unit.pendingAttack) {
@@ -1844,6 +1844,33 @@ function performTailSweep(unit, side) {
   addParticles(unit.x, unit.y - 18, '#cf9bff', 20, { speed: 130 });
 }
 
+function interruptAttack(unit) {
+  unit.pendingAttack = null;
+  unit.attackTimer = 0;
+}
+
+function findNearbyAttackTarget(unit, preferredTarget) {
+  const enemy = otherSide(sideById(unit.side));
+  const candidates = [...enemy.units, ...enemy.buildings, enemy.base];
+  let best = null;
+  let bestScore = Infinity;
+  for (const candidate of candidates) {
+    if (!targetAlive(candidate) || !canTarget(unit, candidate)) continue;
+    const halfWidth = candidate.isBuilding ? candidate.width * 0.42 : candidate.def.radius * 0.65;
+    const distance = Math.hypot(candidate.x - unit.x, candidate.y - unit.y);
+    if (distance > unit.def.range + halfWidth + 14) continue;
+    const preferredDistance = preferredTarget
+      ? Math.hypot(candidate.x - preferredTarget.x, candidate.y - preferredTarget.y)
+      : 0;
+    const score = distance + preferredDistance * 0.35;
+    if (score < bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 function performAttack(unit, target) {
   const def = unit.def;
   unit.attackCooldown = def.attackInterval;
@@ -1890,8 +1917,15 @@ function performAttack(unit, target) {
 }
 
 function resolveAttack(unit, attack) {
-  const target = attack.target;
-  if (!targetAlive(target) || unit.dead) return;
+  if (unit.dead) return;
+  let target = attack.target;
+  if (!targetAlive(target)) {
+    target = findNearbyAttackTarget(unit, target);
+  }
+  if (!targetAlive(target)) {
+    unit.attackCooldown = Math.min(unit.attackCooldown, 0.22);
+    return;
+  }
   const def = unit.def;
 
   if (attack.damageType !== 'melee') {
@@ -1964,7 +1998,7 @@ function tryKnockdown(target, impact, duration) {
   target.downTimer = Math.max(target.downTimer, duration);
   target.knockdownImmune = duration + 5;
   target.target = null;
-  target.pendingAttack = null;
+  interruptAttack(target);
   addFloater('倒地!', target.x, target.y - 70, '#ffe6a4', 14);
   addParticles(target.x, target.y - 18, '#dfcc9d', 10, { speed: 75 });
   return true;
@@ -2016,7 +2050,8 @@ function triggerHitFeedback(source, target, finalDamage, damageType, options) {
     const stun = clamp((damageType === 'explosive' ? 0.2 : 0.105) * massFactor, 0.045, 0.22);
     target.hitStunMax = Math.max(0.05, stun);
     target.hitStun = Math.max(target.hitStun, stun);
-    target.pendingAttack = null;
+    const superArmor = ['paladin', 'boneGiant', 'ancientBeast', 'tank'].includes(target.def?.drawType);
+    if (heavy || !superArmor) interruptAttack(target);
   }
 
   addImpactBurst(
@@ -2557,7 +2592,7 @@ function issueCommand(command) {
   for (const unit of selectedUnits) {
     unit.command = command;
     unit.target = null;
-    unit.pendingAttack = null;
+    interruptAttack(unit);
     unit.detour = null;
     unit.commandFlash = 0.65;
     if (command !== 'attack') unit.chargeDistance = 0;
